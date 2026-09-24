@@ -1,0 +1,28 @@
+schema: spec-driven
+
+context: |
+  Project: ComparaKeys — comparador de preços de keys de jogos.
+  Domain: Sistema que permite ao usuário buscar um jogo e comparar seu preço entre várias lojas de keys, incluindo Steam (via API pública) e lojas parceiras cadastradas.
+  Tech stack: Backend em Xano (XanoScript). Frontend em HTML/CSS/JavaScript puro, sem framework.
+  Architecture: Backend responsável por regras de negócio, autenticação e persistência. Frontend não deve ser considerado mecanismo de segurança.
+  Security: Login obrigatório para usar o site. Autorização de ações (ex.: aprovar lojas) deve ser verificada no backend.
+  Development: O projeto será desenvolvido incrementalmente utilizando OpenSpec. Mudanças relevantes devem ser especificadas antes da implementação.
+  Language: Escrever a documentação do projeto e os artefatos OpenSpec em português brasileiro.
+
+rules:
+  proposal:
+    - Descrever claramente o problema, objetivo e escopo.
+    - Identificar o que está fora do escopo quando necessário.
+  specs:
+    - Escrever requisitos verificáveis.
+    - Utilizar cenários para comportamentos relevantes.
+  tasks:
+    - Dividir a implementação em tarefas pequenas e verificáveis.
+
+operations:
+  apply:
+    guidance:
+      - Executar verificações relevantes antes de concluir (ex.: validar XanoScript com o Xano Developer MCP).
+  archive:
+    guidance:
+      - Confirmar que a implementação corresponde à especificação.
