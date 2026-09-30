@@ -2,14 +2,12 @@
 
 Conceitos principais e relacionamentos:
 
-Usuário
+Usuário (papel: usuario ou admin)
 Jogo
- - possui várias Ofertas (uma por Loja)
 Loja
- - possui várias Ofertas (uma por Jogo que vende)
-Oferta (preço de um Jogo em uma Loja)
+ - fornece Ofertas em tempo real (não persistidas) para os Jogos que vende
 SolicitaçãoDeLoja
- - quando aprovada, origina uma Loja
+ - quando aprovada por um admin, origina uma Loja
 
 ## Usuário
 Representa uma pessoa que usa o site para buscar e comparar preços de jogos.
@@ -17,32 +15,28 @@ Representa uma pessoa que usa o site para buscar e comparar preços de jogos.
 - nome
 - e-mail
 - senha (autenticação)
+- papel (usuario | admin)
 
 ## Jogo
-Representa um jogo cujo preço pode ser comparado entre lojas.
+Representa um jogo pesquisável. Não é necessariamente uma tabela própria — pode ser resolvido diretamente via busca na Steam (nome → App ID), com cache leve opcional para agilizar buscas repetidas.
 ### Principais informações
 - nome
-- identificador na Steam (Steam App ID), quando aplicável
-### Relacionamentos
-Um jogo pode ter várias ofertas, uma em cada loja que o vende.
+- identificador na Steam (Steam App ID)
 
 ## Loja
-Representa uma loja ou distribuidora oficial de keys de jogos incluída no sistema.
+Representa uma loja ou distribuidora de keys de jogos incluída no sistema.
 ### Principais informações
 - nome da loja
 - link/site da loja
-- status (ativa, pendente de aprovação, etc.)
-### Relacionamentos
-Uma loja pode ter várias ofertas, uma para cada jogo que vende.
+- status (ativa, pendente de aprovação, inativa)
+- forma de obtenção do preço (API oficial, no caso da Steam; scraping configurado, no caso de lojas parceiras)
 
-## Oferta
-Representa o preço de um jogo específico em uma loja específica.
-### Principais informações
-- preço
+## Oferta (não persistida)
+Representa o preço de um jogo em uma loja, no momento da busca. É calculada em tempo real, consultando a Steam (via API) e as lojas parceiras (via scraping configurado), não fica salva no banco.
+### Principais informações (em memória, por busca)
+- preço (em BRL)
 - link direto para a compra
-- data da última atualização do preço
-### Relacionamentos
-Uma oferta pertence a um jogo e a uma loja.
+- loja de origem
 
 ## SolicitaçãoDeLoja
 Representa o pedido de uma loja para ser incluída no sistema.
@@ -50,5 +44,6 @@ Representa o pedido de uma loja para ser incluída no sistema.
 - nome da loja solicitante
 - dados de contato
 - status da solicitação (pendente, aprovada, rejeitada)
+- verificações automáticas básicas (ex.: URL acessível)
 ### Relacionamentos
-Quando aprovada, origina uma Loja.
+Quando aprovada por um admin, origina uma Loja.
