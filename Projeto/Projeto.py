@@ -108,6 +108,43 @@ class SearchState(rx.State):
         self.is_loading_price = False
 
 
+# Estilo global: fade-in suave ao carregar a página
+GLOBAL_CSS = """
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.fade-in {
+    animation: fadeIn 0.5s ease-out;
+}
+"""
+
+
+def navbar() -> rx.Component:
+    return rx.hstack(
+        rx.hstack(
+            rx.icon("gamepad-2", color="var(--violet-9)", size=22),
+            rx.text("ComparaKeys", weight="bold", size="4"),
+            align="center",
+            spacing="2",
+        ),
+        rx.spacer(),
+        rx.button(
+            "Entrar",
+            variant="outline",
+            size="2",
+            style={
+                "cursor": "pointer",
+                "_hover": {"background_color": "var(--violet-3)"},
+            },
+        ),
+        width="100%",
+        padding="1rem 2rem",
+        align="center",
+        border_bottom="1px solid var(--gray-5)",
+    )
+
+
 def game_result(game: SteamGame) -> rx.Component:
     return rx.button(
         rx.hstack(
@@ -120,122 +157,150 @@ def game_result(game: SteamGame) -> rx.Component:
         variant="outline",
         size="3",
         width="100%",
+        style={
+            "cursor": "pointer",
+            "transition": "all 0.15s ease",
+            "_hover": {
+                "background_color": "var(--violet-3)",
+                "border_color": "var(--violet-8)",
+                "transform": "translateY(-1px)",
+            },
+        },
     )
 
 
 def index() -> rx.Component:
-    return rx.center(
-        rx.box(
-            rx.vstack(
-                rx.text("COMPARAKEYS", size="2", weight="bold", color="violet"),
-                rx.heading("Encontre seu próximo jogo", size="8"),
-                rx.text(
-                    "Pesquise na Steam e consulte o preço atual para o Brasil.",
-                    color="gray",
-                    size="4",
-                ),
-                rx.hstack(
-                    rx.input(
-                        value=SearchState.search_term,
-                        on_change=SearchState.set_search_term,
-                        placeholder="Digite o nome de um jogo",
-                        aria_label="Nome do jogo",
-                        max_length=100,
-                        size="3",
-                        width="100%",
-                    ),
-                    rx.button(
-                        rx.cond(SearchState.is_searching, "Buscando...", "Buscar"),
-                        on_click=SearchState.search,
-                        is_disabled=SearchState.is_searching,
-                        size="3",
-                    ),
-                    align="center",
-                    width="100%",
-                ),
-                rx.cond(
-                    SearchState.search_error != "",
-                    rx.text(SearchState.search_error, color="tomato"),
-                    rx.fragment(),
-                ),
-                rx.cond(
-                    SearchState.no_results,
-                    rx.text("Nenhum jogo encontrado. Tente outro nome.", color="gray"),
-                    rx.fragment(),
-                ),
-                rx.cond(
-                    SearchState.games.length() > 0,
+    return rx.fragment(
+        rx.html(f"<style>{GLOBAL_CSS}</style>"),
+        rx.vstack(
+            navbar(),
+            rx.center(
+                rx.box(
                     rx.vstack(
-                        rx.heading("Escolha o jogo", size="4"),
-                        rx.foreach(SearchState.games, game_result),
-                        align="stretch",
-                        width="100%",
-                        spacing="2",
-                    ),
-                    rx.fragment(),
-                ),
-                rx.cond(
-                    SearchState.selected_app_id > 0,
-                    rx.card(
-                        rx.vstack(
-                            rx.text("PREÇO NA STEAM", size="2", weight="bold", color="gray"),
-                            rx.heading(SearchState.selected_name, size="5"),
-                            rx.cond(
-                                SearchState.is_loading_price,
-                                rx.hstack(
-                                    rx.spinner(),
-                                    rx.text("Consultando preço atual..."),
-                                    align="center",
-                                ),
-                                rx.fragment(),
-                            ),
-                            rx.cond(
-                                SearchState.price_status == "paid",
-                                rx.heading(
-                                    SearchState.formatted_price,
-                                    size="7",
-                                    color="green",
-                                ),
-                                rx.fragment(),
-                            ),
-                            rx.cond(
-                                SearchState.price_status == "free",
-                                rx.text("Gratuito na Steam", color="green"),
-                                rx.fragment(),
-                            ),
-                            rx.cond(
-                                SearchState.price_status == "unavailable",
-                                rx.text(
-                                    "Preço em BRL indisponível para este jogo.",
-                                    color="gray",
-                                ),
-                                rx.fragment(),
-                            ),
-                            rx.cond(
-                                SearchState.price_error != "",
-                                rx.text(SearchState.price_error, color="tomato"),
-                                rx.fragment(),
-                            ),
-                            align="start",
-                            width="100%",
-                            spacing="3",
+                        rx.text(
+                            "COMPARAKEYS",
+                            size="2",
+                            weight="bold",
+                            color="violet",
+                            letter_spacing="0.1em",
                         ),
+                        rx.heading("Encontre seu próximo jogo", size="8"),
+                        rx.text(
+                            "Pesquise na Steam e consulte o preço atual para o Brasil.",
+                            color="gray",
+                            size="4",
+                        ),
+                        rx.hstack(
+                            rx.input(
+                                value=SearchState.search_term,
+                                on_change=SearchState.set_search_term,
+                                placeholder="Digite o nome de um jogo",
+                                aria_label="Nome do jogo",
+                                max_length=100,
+                                size="3",
+                                width="100%",
+                            ),
+                            rx.button(
+                                rx.cond(SearchState.is_searching, "Buscando...", "Buscar"),
+                                on_click=SearchState.search,
+                                is_disabled=SearchState.is_searching,
+                                size="3",
+                                style={
+                                    "cursor": "pointer",
+                                    "_hover": {"opacity": "0.85"},
+                                },
+                            ),
+                            align="center",
+                            width="100%",
+                        ),
+                        rx.cond(
+                            SearchState.search_error != "",
+                            rx.text(SearchState.search_error, color="tomato"),
+                            rx.fragment(),
+                        ),
+                        rx.cond(
+                            SearchState.no_results,
+                            rx.text("Nenhum jogo encontrado. Tente outro nome.", color="gray"),
+                            rx.fragment(),
+                        ),
+                        rx.cond(
+                            SearchState.games.length() > 0,
+                            rx.vstack(
+                                rx.heading("Escolha o jogo", size="4"),
+                                rx.foreach(SearchState.games, game_result),
+                                align="stretch",
+                                width="100%",
+                                spacing="2",
+                            ),
+                            rx.fragment(),
+                        ),
+                        rx.cond(
+                            SearchState.selected_app_id > 0,
+                            rx.card(
+                                rx.vstack(
+                                    rx.text("PREÇO NA STEAM", size="2", weight="bold", color="gray"),
+                                    rx.heading(SearchState.selected_name, size="5"),
+                                    rx.cond(
+                                        SearchState.is_loading_price,
+                                        rx.hstack(
+                                            rx.spinner(),
+                                            rx.text("Consultando preço atual..."),
+                                            align="center",
+                                        ),
+                                        rx.fragment(),
+                                    ),
+                                    rx.cond(
+                                        SearchState.price_status == "paid",
+                                        rx.heading(
+                                            SearchState.formatted_price,
+                                            size="7",
+                                            color="green",
+                                        ),
+                                        rx.fragment(),
+                                    ),
+                                    rx.cond(
+                                        SearchState.price_status == "free",
+                                        rx.text("Gratuito na Steam", color="green"),
+                                        rx.fragment(),
+                                    ),
+                                    rx.cond(
+                                        SearchState.price_status == "unavailable",
+                                        rx.text(
+                                            "Preço em BRL indisponível para este jogo.",
+                                            color="gray",
+                                        ),
+                                        rx.fragment(),
+                                    ),
+                                    rx.cond(
+                                        SearchState.price_error != "",
+                                        rx.text(SearchState.price_error, color="tomato"),
+                                        rx.fragment(),
+                                    ),
+                                    align="start",
+                                    width="100%",
+                                    spacing="3",
+                                ),
+                                width="100%",
+                            ),
+                            rx.fragment(),
+                        ),
+                        align="stretch",
+                        spacing="5",
                         width="100%",
                     ),
-                    rx.fragment(),
+                    max_width="720px",
+                    width="100%",
+                    padding="2rem",
+                    class_name="fade-in",
                 ),
-                align="stretch",
-                spacing="5",
                 width="100%",
+                padding="1rem",
             ),
-            max_width="720px",
             width="100%",
-            padding="2rem",
+            spacing="0",
         ),
-        min_height="100vh",
-        padding="1rem",
     )
 
 
-app = rx.App()
+app = rx.App(theme=rx.theme(accent_color="violet", radius="large", appearance="dark"))
 app.add_page(index)
