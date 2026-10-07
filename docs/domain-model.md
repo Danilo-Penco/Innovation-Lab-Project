@@ -10,7 +10,7 @@ SolicitaçãoDeLoja
  - quando aprovada por um admin, origina uma Loja
 
 ## Usuário
-Representa uma pessoa que usa o site para buscar e comparar preços de jogos.
+Representa uma pessoa que usa as funcionalidades autenticadas do ComparaKeys. A busca inicial de preço na Steam pode ser usada sem conta.
 ### Principais informações
 - nome
 - e-mail
@@ -18,7 +18,7 @@ Representa uma pessoa que usa o site para buscar e comparar preços de jogos.
 - papel (usuario | admin)
 
 ## Jogo
-Representa um jogo pesquisável. Não é necessariamente uma tabela própria — pode ser resolvido diretamente via busca na Steam (nome → App ID), com cache leve opcional para agilizar buscas repetidas.
+Representa um jogo pesquisável. Não é necessariamente uma tabela própria — na busca pública inicial, é resolvido a cada consulta na Steam (nome → App ID) e não é persistido nem armazenado em cache.
 ### Principais informações
 - nome
 - identificador na Steam (Steam App ID)
@@ -32,7 +32,7 @@ Representa uma loja ou distribuidora de keys de jogos incluída no sistema.
 - forma de obtenção do preço (API oficial, no caso da Steam; scraping configurado, no caso de lojas parceiras)
 
 ## Oferta (não persistida)
-Representa o preço de um jogo em uma loja, no momento da busca. É calculada em tempo real, consultando a Steam (via API) e as lojas parceiras (via scraping configurado), não fica salva no banco.
+Representa o preço de um jogo em uma loja, no momento da busca. Na primeira funcionalidade, é consultada em tempo real exclusivamente na Steam, via servidor Reflex e API pública, e não fica salva no banco. Outras lojas não fazem parte deste fluxo.
 ### Principais informações (em memória, por busca)
 - preço (em BRL)
 - link direto para a compra
