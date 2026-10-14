@@ -1,3 +1,5 @@
+import asyncio
+
 import reflex as rx
 
 from Projeto.auth import (
@@ -7,9 +9,12 @@ from Projeto.auth import (
     register_account,
     verify_credentials,
 )
+from Projeto.catalog import CATALOG_GAMES, CatalogGame, build_steam_search_url
+from Projeto.gog import GogOffer, GogServiceError, search_gog_offer
 from Projeto.steam import (
     InvalidSearchTerm,
     SteamGame,
+    SteamPrice,
     SteamServiceError,
     find_game_by_app_id,
     format_brl,
@@ -24,12 +29,20 @@ class SearchState(rx.State):
     games: list[SteamGame] = []
     selected_app_id: int = 0
     selected_name: str = ""
+    selected_cover_url: str = ""
     search_error: str = ""
     price_error: str = ""
     price_status: str = ""
     price_cents: int = 0
+    gog_title: str = ""
+    gog_store_url: str = ""
+    gog_cover_url: str = ""
+    gog_status: str = ""
+    gog_price_cents: int = 0
+    gog_error: str = ""
     is_searching: bool = False
     is_loading_price: bool = False
+    is_loading_gog: bool = False
     no_results: bool = False
     _search_request_id: int = 0
     _price_request_id: int = 0
@@ -38,9 +51,64 @@ class SearchState(rx.State):
     def set_search_term(self, value: str):
         self.search_term = value
 
+    @rx.event
+    def initialize_from_query(self):
+        self.search_term = self.router.url.query_parameters.get("term", "")
+        self.search_error = ""
+        self.price_error = ""
+        self.price_status = ""
+        self.price_cents = 0
+        self.selected_cover_url = ""
+        self.gog_title = ""
+        self.gog_store_url = ""
+        self.gog_cover_url = ""
+        self.gog_status = ""
+        self.gog_price_cents = 0
+        self.gog_error = ""
+        self.selected_app_id = 0
+        self.selected_name = ""
+        self.games = []
+        self.no_results = False
+        self.is_searching = False
+        self.is_loading_price = False
+        self.is_loading_gog = False
+
     @rx.var
     def formatted_price(self) -> str:
         return format_brl(self.price_cents)
+
+    @rx.var
+    def formatted_gog_price(self) -> str:
+        return format_brl(self.gog_price_cents)
+
+    @rx.var
+    def steam_cover_url(self) -> str:
+        if self.selected_cover_url:
+            return self.selected_cover_url
+        return (
+            "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/"
+            f"{self.selected_app_id}/header.jpg"
+        )
+
+    @rx.var
+    def steam_store_url(self) -> str:
+        return f"https://store.steampowered.com/app/{self.selected_app_id}/"
+
+    @rx.var
+    def steam_is_cheapest(self) -> bool:
+        return (
+            self.price_status in ("paid", "free")
+            and self.gog_status in ("paid", "free")
+            and self.price_cents <= self.gog_price_cents
+        )
+
+    @rx.var
+    def gog_is_cheapest(self) -> bool:
+        return (
+            self.price_status in ("paid", "free")
+            and self.gog_status in ("paid", "free")
+            and self.gog_price_cents <= self.price_cents
+        )
 
     @rx.event
     async def search(self):
@@ -51,12 +119,20 @@ class SearchState(rx.State):
         self.price_error = ""
         self.price_status = ""
         self.price_cents = 0
+        self.selected_cover_url = ""
+        self.gog_title = ""
+        self.gog_store_url = ""
+        self.gog_cover_url = ""
+        self.gog_status = ""
+        self.gog_price_cents = 0
+        self.gog_error = ""
         self.selected_app_id = 0
         self.selected_name = ""
         self.games = []
         self.no_results = False
         self.is_searching = False
         self.is_loading_price = False
+        self.is_loading_gog = False
 
         try:
             term = validate_search_term(self.search_term)
@@ -93,26 +169,72 @@ class SearchState(rx.State):
         self.price_error = ""
         self.price_status = ""
         self.price_cents = 0
+        self.selected_cover_url = ""
+        self.gog_title = ""
+        self.gog_store_url = ""
+        self.gog_cover_url = ""
+        self.gog_status = ""
+        self.gog_price_cents = 0
+        self.gog_error = ""
         self.is_loading_price = True
+        self.is_loading_gog = True
 
-        try:
-            price = await get_steam_game_price(game.app_id)
-        except SteamServiceError as error:
-            if request_id == self._price_request_id:
-                self.price_error = str(error)
-                self.is_loading_price = False
-            return
+        steam_result, gog_result = await asyncio.gather(
+            get_steam_game_price(game.app_id),
+            search_gog_offer(game.name),
+            return_exceptions=True,
+        )
 
         if (
             request_id != self._price_request_id
             or self.selected_app_id != game.app_id
         ):
             return
+
+        if isinstance(steam_result, SteamServiceError):
+            self.price_error = str(steam_result)
+        elif isinstance(steam_result, BaseException):
+            self.is_loading_price = False
+            self.is_loading_gog = False
+            raise steam_result
+        else:
+            self._apply_steam_price(steam_result)
+
+        if isinstance(gog_result, GogServiceError):
+            self.gog_error = (
+                "A comparação com a GOG está indisponível no momento."
+            )
+        elif isinstance(gog_result, BaseException):
+            self.is_loading_price = False
+            self.is_loading_gog = False
+            raise gog_result
+        elif gog_result is None:
+            self.gog_error = (
+                "Não foi encontrada uma correspondência única na GOG."
+            )
+        elif gog_result.status == "unavailable":
+            self.gog_error = (
+                "A GOG não informou um preço regional disponível em BRL."
+            )
+        else:
+            self._apply_gog_offer(gog_result)
+
+        self.is_loading_price = False
+        self.is_loading_gog = False
+
+    def _apply_steam_price(self, price: SteamPrice):
         self.price_status = price.status
         self.price_cents = price.final_price_minor or 0
+        self.selected_cover_url = price.header_image
         if price.name:
             self.selected_name = price.name
-        self.is_loading_price = False
+
+    def _apply_gog_offer(self, offer: GogOffer):
+        self.gog_title = offer.title
+        self.gog_store_url = offer.store_url
+        self.gog_cover_url = offer.cover_url
+        self.gog_status = offer.status
+        self.gog_price_cents = offer.final_price_minor or 0
 
 
 class AuthState(rx.State):
@@ -208,6 +330,29 @@ class AuthState(rx.State):
         self.is_splash_visible = False
 
 
+class CatalogState(rx.State):
+    search_term: str = ""
+    search_error: str = ""
+
+    @rx.event
+    def prepare_page(self):
+        self.search_error = ""
+
+    @rx.event
+    def set_search_term(self, value: str):
+        self.search_term = value
+        self.search_error = ""
+
+    @rx.event
+    def search(self):
+        try:
+            search_url = build_steam_search_url(self.search_term)
+        except InvalidSearchTerm as error:
+            self.search_error = str(error)
+            return
+        return rx.redirect(search_url)
+
+
 # Estilo global: fade-in suave ao carregar a página
 GLOBAL_CSS = """
 @keyframes fadeIn {
@@ -223,6 +368,12 @@ GLOBAL_CSS = """
 }
 .auth-card {
     animation: fadeIn 0.5s ease-out, glow 2.4s ease-in-out infinite;
+}
+.price-comparison-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+    gap: 1rem;
+    width: 100%;
 }
 """
 
@@ -274,6 +425,191 @@ def game_result(game: SteamGame) -> rx.Component:
                 "transform": "translateY(-1px)",
             },
         },
+    )
+
+
+def price_comparison() -> rx.Component:
+    return rx.vstack(
+        rx.cond(
+            SearchState.is_loading_price | SearchState.is_loading_gog,
+            rx.hstack(
+                rx.spinner(),
+                rx.text("Consultando preços atuais na Steam e na GOG..."),
+                align="center",
+            ),
+            rx.fragment(),
+        ),
+        rx.box(
+            rx.card(
+                rx.vstack(
+                    rx.text("STEAM", size="2", weight="bold", color="gray"),
+                    rx.image(
+                        src=SearchState.steam_cover_url,
+                        alt=f"Capa de {SearchState.selected_name}",
+                        width="100%",
+                        height="170px",
+                        object_fit="cover",
+                        border_radius="12px",
+                        background="linear-gradient(135deg, #39235c, #130e1c)",
+                    ),
+                    rx.link(
+                        SearchState.selected_name,
+                        href=SearchState.steam_store_url,
+                        is_external=True,
+                        rel="noopener noreferrer",
+                        color="#c4b5fd",
+                        weight="bold",
+                        size="4",
+                    ),
+                    rx.cond(
+                        SearchState.price_status == "paid",
+                        rx.heading(
+                            SearchState.formatted_price,
+                            size="7",
+                            color=rx.cond(
+                                SearchState.steam_is_cheapest,
+                                "#4ade80",
+                                "white",
+                            ),
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.cond(
+                        SearchState.price_status == "free",
+                        rx.hstack(
+                            rx.text("Grátis —"),
+                            rx.text(
+                                SearchState.formatted_price,
+                                color=rx.cond(
+                                    SearchState.steam_is_cheapest,
+                                    "#4ade80",
+                                    "white",
+                                ),
+                            ),
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.cond(
+                        SearchState.price_status == "unavailable",
+                        rx.text(
+                            "Preço em BRL indisponível para este jogo.",
+                            color="gray",
+                        ),
+                        rx.fragment(),
+                    ),
+                    align="stretch",
+                    width="100%",
+                    spacing="3",
+                ),
+                width="100%",
+                height="100%",
+                background="rgba(17, 13, 26, 0.94)",
+                border="1px solid #48336a",
+            ),
+            rx.cond(
+                (SearchState.gog_status == "paid")
+                | (SearchState.gog_status == "free"),
+                rx.card(
+                    rx.vstack(
+                        rx.text("GOG", size="2", weight="bold", color="gray"),
+                        rx.image(
+                            src=SearchState.gog_cover_url,
+                            alt=f"Capa de {SearchState.gog_title}",
+                            width="100%",
+                            height="170px",
+                            object_fit="cover",
+                            border_radius="12px",
+                            background="linear-gradient(135deg, #39235c, #130e1c)",
+                        ),
+                        rx.link(
+                            SearchState.gog_title,
+                            href=SearchState.gog_store_url,
+                            is_external=True,
+                            rel="noopener noreferrer",
+                            color="#c4b5fd",
+                            weight="bold",
+                            size="4",
+                        ),
+                        rx.cond(
+                            SearchState.gog_status == "paid",
+                            rx.heading(
+                                SearchState.formatted_gog_price,
+                                size="7",
+                                color=rx.cond(
+                                    SearchState.gog_is_cheapest,
+                                    "#4ade80",
+                                    "white",
+                                ),
+                            ),
+                            rx.fragment(),
+                        ),
+                        rx.cond(
+                            SearchState.gog_status == "free",
+                            rx.hstack(
+                                rx.text("Grátis —"),
+                                rx.text(
+                                    SearchState.formatted_gog_price,
+                                    color=rx.cond(
+                                        SearchState.gog_is_cheapest,
+                                        "#4ade80",
+                                        "white",
+                                    ),
+                                ),
+                            ),
+                            rx.fragment(),
+                        ),
+                        align="stretch",
+                        width="100%",
+                        spacing="3",
+                    ),
+                    width="100%",
+                    height="100%",
+                    background="rgba(17, 13, 26, 0.94)",
+                    border="1px solid #48336a",
+                ),
+                rx.fragment(),
+            ),
+            class_name="price-comparison-grid",
+        ),
+        rx.cond(
+            SearchState.price_error != "",
+            rx.text(SearchState.price_error, color="tomato", role="alert"),
+            rx.fragment(),
+        ),
+        rx.cond(
+            SearchState.gog_error != "",
+            rx.text(SearchState.gog_error, color="gray", role="status"),
+            rx.fragment(),
+        ),
+        align="stretch",
+        width="100%",
+        spacing="3",
+    )
+
+
+def catalog_game_card(game: CatalogGame) -> rx.Component:
+    return rx.box(
+        rx.image(
+            src=game.cover_url,
+            alt=f"Capa de {game.name}",
+            width="100%",
+            height="170px",
+            object_fit="cover",
+            border_radius="14px",
+            background="linear-gradient(135deg, #39235c, #130e1c)",
+            loading="lazy",
+        ),
+        rx.text(
+            game.name,
+            color="white",
+            weight="medium",
+            margin_top="0.8rem",
+        ),
+        width="100%",
+        padding="0.85rem",
+        border="1px solid #48336a",
+        border_radius="18px",
+        background="rgba(17, 13, 26, 0.94)",
     )
 
 
@@ -344,59 +680,14 @@ def steam_search() -> rx.Component:
                         ),
                         rx.cond(
                             SearchState.selected_app_id > 0,
-                            rx.card(
-                                rx.vstack(
-                                    rx.text("PREÇO NA STEAM", size="2", weight="bold", color="gray"),
-                                    rx.heading(SearchState.selected_name, size="5"),
-                                    rx.cond(
-                                        SearchState.is_loading_price,
-                                        rx.hstack(
-                                            rx.spinner(),
-                                            rx.text("Consultando preço atual..."),
-                                            align="center",
-                                        ),
-                                        rx.fragment(),
-                                    ),
-                                    rx.cond(
-                                        SearchState.price_status == "paid",
-                                        rx.heading(
-                                            SearchState.formatted_price,
-                                            size="7",
-                                            color="green",
-                                        ),
-                                        rx.fragment(),
-                                    ),
-                                    rx.cond(
-                                        SearchState.price_status == "free",
-                                        rx.text("Gratuito na Steam", color="green"),
-                                        rx.fragment(),
-                                    ),
-                                    rx.cond(
-                                        SearchState.price_status == "unavailable",
-                                        rx.text(
-                                            "Preço em BRL indisponível para este jogo.",
-                                            color="gray",
-                                        ),
-                                        rx.fragment(),
-                                    ),
-                                    rx.cond(
-                                        SearchState.price_error != "",
-                                        rx.text(SearchState.price_error, color="tomato"),
-                                        rx.fragment(),
-                                    ),
-                                    align="start",
-                                    width="100%",
-                                    spacing="3",
-                                ),
-                                width="100%",
-                            ),
+                            price_comparison(),
                             rx.fragment(),
                         ),
                         align="stretch",
                         spacing="5",
                         width="100%",
                     ),
-                    max_width="720px",
+                    max_width="920px",
                     width="100%",
                     padding="2rem",
                     class_name="fade-in",
@@ -641,29 +932,70 @@ def catalog_page() -> rx.Component:
         rx.html(f"<style>{GLOBAL_CSS}</style>"),
         rx.cond(
             AuthState.catalog_authorized,
-            rx.center(
-                rx.box(
+            rx.vstack(
+                navbar(),
+                rx.center(
                     rx.vstack(
-                        auth_brand(),
-                        rx.heading("Catálogo", size="8", color="white"),
+                        rx.hstack(
+                            rx.input(
+                                value=CatalogState.search_term,
+                                on_change=CatalogState.set_search_term,
+                                placeholder="Comparar Preços",
+                                aria_label="Comparar Preços",
+                                max_length=100,
+                                size="3",
+                                width="100%",
+                            ),
+                            rx.button(
+                                "Buscar",
+                                on_click=CatalogState.search,
+                                size="3",
+                                color_scheme="violet",
+                                cursor="pointer",
+                            ),
+                            width="100%",
+                            align="center",
+                        ),
+                        rx.cond(
+                            CatalogState.search_error != "",
+                            rx.text(
+                                CatalogState.search_error,
+                                role="alert",
+                                color="#fca5a5",
+                            ),
+                            rx.fragment(),
+                        ),
+                        rx.heading("Jogos para descobrir", size="7", color="white"),
                         rx.text(
-                            "Seu catálogo de jogos aparecerá aqui.",
+                            "Conheça alguns jogos e pesquise na Steam.",
                             color="#b8afc8",
                         ),
-                        align="center",
+                        rx.grid(
+                            *[
+                                catalog_game_card(game)
+                                for game in CATALOG_GAMES
+                            ],
+                            width="100%",
+                            style={
+                                "gridTemplateColumns": (
+                                    "repeat(auto-fit, minmax(min(100%, 220px), 1fr))"
+                                ),
+                                "gap": "1rem",
+                            },
+                        ),
+                        width="100%",
+                        max_width="1100px",
+                        padding="2rem 1.25rem",
+                        align="stretch",
                         spacing="4",
                     ),
                     width="100%",
-                    max_width="720px",
-                    padding="2rem",
-                    border="1px solid #48336a",
-                    border_radius="24px",
-                    background="rgba(17, 13, 26, 0.94)",
+                    flex="1",
                 ),
                 width="100%",
                 min_height="100vh",
-                padding="1.25rem",
                 background="radial-gradient(circle at 50% 25%, #261442 0%, #0b0910 54%, #050407 100%)",
+                spacing="0",
             ),
             rx.center(
                 rx.spinner(size="3", color="#c4b5fd"),
@@ -678,5 +1010,9 @@ def catalog_page() -> rx.Component:
 app = rx.App(theme=rx.theme(accent_color="violet", radius="large", appearance="dark"))
 app.add_page(login_page, route="/", on_load=AuthState.prepare_form)
 app.add_page(register_page, route="/cadastro", on_load=AuthState.prepare_form)
-app.add_page(catalog_page, route="/catalogo", on_load=AuthState.guard_catalog)
-app.add_page(steam_search, route="/buscar")
+app.add_page(
+    catalog_page,
+    route="/catalogo",
+    on_load=[AuthState.guard_catalog, CatalogState.prepare_page],
+)
+app.add_page(steam_search, route="/buscar", on_load=SearchState.initialize_from_query)

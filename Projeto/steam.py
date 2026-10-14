@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -36,6 +37,7 @@ class SteamPrice:
     name: str
     status: PriceStatus
     final_price_minor: int | None = None
+    header_image: str = ""
 
 
 def validate_search_term(term: str) -> str:
@@ -119,17 +121,58 @@ def parse_game_price(payload: object, app_id: int) -> SteamPrice:
     name = data.get("name")
     if not isinstance(name, str) or not name.strip():
         raise SteamServiceError("A Steam retornou uma resposta de preço inválida.")
+    header_image = data.get("header_image", "")
+    if not isinstance(header_image, str):
+        raise SteamServiceError("A Steam retornou uma resposta de preço inválida.")
+    if header_image:
+        try:
+            parsed_image_url = urlparse(header_image)
+            valid_image_url = (
+                parsed_image_url.scheme == "https"
+                and parsed_image_url.hostname is not None
+                and (
+                    parsed_image_url.hostname == "steamstatic.com"
+                    or parsed_image_url.hostname.endswith(".steamstatic.com")
+                )
+                and parsed_image_url.username is None
+                and parsed_image_url.password is None
+                and parsed_image_url.port is None
+            )
+        except ValueError as error:
+            raise SteamServiceError("A Steam retornou uma imagem inválida.") from error
+        if not valid_image_url:
+            raise SteamServiceError("A Steam retornou uma imagem inválida.")
 
     if data.get("type") != "game":
-        return SteamPrice(app_id=app_id, name=name.strip(), status="unavailable")
+        return SteamPrice(
+            app_id=app_id,
+            name=name.strip(),
+            status="unavailable",
+            header_image=header_image,
+        )
     if data.get("is_free") is True:
-        return SteamPrice(app_id=app_id, name=name.strip(), status="free")
+        return SteamPrice(
+            app_id=app_id,
+            name=name.strip(),
+            status="free",
+            header_image=header_image,
+        )
     if data.get("is_free") is not False:
-        return SteamPrice(app_id=app_id, name=name.strip(), status="unavailable")
+        return SteamPrice(
+            app_id=app_id,
+            name=name.strip(),
+            status="unavailable",
+            header_image=header_image,
+        )
 
     price_overview = data.get("price_overview")
     if not isinstance(price_overview, dict):
-        return SteamPrice(app_id=app_id, name=name.strip(), status="unavailable")
+        return SteamPrice(
+            app_id=app_id,
+            name=name.strip(),
+            status="unavailable",
+            header_image=header_image,
+        )
 
     currency = price_overview.get("currency")
     final_price = price_overview.get("final")
@@ -139,13 +182,19 @@ def parse_game_price(payload: object, app_id: int) -> SteamPrice:
         or isinstance(final_price, bool)
         or final_price < 0
     ):
-        return SteamPrice(app_id=app_id, name=name.strip(), status="unavailable")
+        return SteamPrice(
+            app_id=app_id,
+            name=name.strip(),
+            status="unavailable",
+            header_image=header_image,
+        )
 
     return SteamPrice(
         app_id=app_id,
         name=name.strip(),
         status="paid",
         final_price_minor=final_price,
+        header_image=header_image,
     )
 
 

@@ -44,7 +44,7 @@ O sistema SHALL autenticar as credenciais no backend da aplicação Reflex e SHA
 - **THEN** o sistema não inicia uma sessão e exibe uma mensagem genérica de falha de autenticação
 
 ### Requirement: Acesso protegido ao catálogo
-O sistema SHALL proteger a página de catálogo no backend Reflex e SHALL permitir sua exibição somente a uma sessão autenticada. O catálogo desta mudança SHALL ser um placeholder para a funcionalidade que será implementada posteriormente.
+O sistema SHALL proteger a página de catálogo no backend Reflex e SHALL permitir sua exibição somente a uma sessão autenticada. O conteúdo do catálogo SHALL seguir a capacidade `game-catalog`.
 
 #### Scenario: Navegação direta sem autenticação
 - **WHEN** uma pessoa sem sessão abre diretamente a rota do catálogo
@@ -52,7 +52,7 @@ O sistema SHALL proteger a página de catálogo no backend Reflex e SHALL permit
 
 #### Scenario: Navegação ao catálogo com sessão
 - **WHEN** uma pessoa autenticada abre a rota do catálogo
-- **THEN** o sistema apresenta o placeholder do catálogo
+- **THEN** o sistema apresenta o catálogo definido pela capacidade `game-catalog`
 
 ### Requirement: Splash screen após autenticação
 Após um login ou cadastro bem-sucedido, o sistema SHALL apresentar uma splash screen breve com identidade visual preta e roxa e SHALL encaminhar a sessão autenticada para a rota do catálogo. Falhas de login ou cadastro SHALL permanecer no formulário e SHALL NOT iniciar o redirecionamento.

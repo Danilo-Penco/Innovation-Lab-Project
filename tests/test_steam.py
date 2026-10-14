@@ -60,6 +60,7 @@ class SteamResponseParsingTests(unittest.TestCase):
                         "type": "game",
                         "name": "Portal 2",
                         "is_free": False,
+                        "header_image": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/header.jpg",
                         "price_overview": {"currency": "BRL", "final": 659},
                     },
                 }
@@ -68,6 +69,28 @@ class SteamResponseParsingTests(unittest.TestCase):
         )
         self.assertEqual(price.status, "paid")
         self.assertEqual(price.final_price_minor, 659)
+        self.assertEqual(
+            price.header_image,
+            "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/header.jpg",
+        )
+
+    def test_unsafe_header_image_is_rejected(self) -> None:
+        with self.assertRaises(SteamServiceError):
+            parse_game_price(
+                {
+                    "620": {
+                        "success": True,
+                        "data": {
+                            "type": "game",
+                            "name": "Portal 2",
+                            "is_free": False,
+                            "header_image": "https://attacker.invalid/cover.jpg",
+                            "price_overview": {"currency": "BRL", "final": 659},
+                        },
+                    }
+                },
+                620,
+            )
 
     def test_free_game_does_not_require_price_overview(self) -> None:
         price = parse_game_price(
