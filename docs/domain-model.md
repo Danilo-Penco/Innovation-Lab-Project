@@ -2,7 +2,7 @@
 
 Conceitos principais e relacionamentos:
 
-Usuário (papel: usuario ou admin)
+Usuário (conta autenticada; papéis/permissões ainda não implementados)
 Jogo
 Loja
  - fornece Ofertas em tempo real (não persistidas) para os Jogos que vende
@@ -10,12 +10,16 @@ SolicitaçãoDeLoja
  - quando aprovada por um admin, origina uma Loja
 
 ## Usuário
-Representa uma pessoa que usa as funcionalidades autenticadas do ComparaKeys. A busca inicial de preço na Steam pode ser usada sem conta.
+Representa uma pessoa que usa as funcionalidades autenticadas do ComparaKeys. O cadastro e o login desta etapa usam o banco SQLite próprio da aplicação Reflex; a busca pública Steam pode ser usada sem conta.
 ### Principais informações
-- nome
-- e-mail
-- senha (autenticação)
-- papel (usuario | admin)
+- identificador da conta
+- e-mail normalizado (único, sem distinção entre maiúsculas e minúsculas)
+- salt e hash da senha (a senha em texto puro não é persistida)
+
+### Autenticação e escopo atual
+- A sessão Reflex mantém somente a identidade da conta no estado do servidor.
+- Papéis de usuário/admin, recuperação de senha e login externo não fazem parte desta etapa.
+- O catálogo é protegido e aparece inicialmente como placeholder; a busca pública Steam permanece disponível em `/buscar`.
 
 ## Jogo
 Representa um jogo pesquisável. Não é necessariamente uma tabela própria — na busca pública inicial, é resolvido a cada consulta na Steam (nome → App ID) e não é persistido nem armazenado em cache.

@@ -1,7 +1,7 @@
 ﻿# Project Overview — ComparaKeys
 
 ## 1. Visão geral
-Site que permite ao usuário pesquisar um jogo e comparar preços de lojas digitais. A primeira tela funcional consulta a Steam em tempo real e apresenta o preço regional atual para o Brasil.
+Site que permite ao usuário pesquisar um jogo e comparar preços de lojas digitais. A página inicial oferece login/cadastro; a busca pública da Steam continua disponível em uma rota própria e apresenta o preço regional atual para o Brasil.
 
 ## 2. Problema
 Para encontrar o menor preço de uma key de jogo, o usuário hoje precisa visitar manualmente várias lojas diferentes, comparando preços um a um — algo demorado e pouco prático.
@@ -17,12 +17,14 @@ Para encontrar o menor preço de uma key de jogo, o usuário hoje precisa visita
 - Lojas/distribuidoras de keys de jogos que desejam ser incluídas na comparação.
 
 ## 5. Escopo
-Escopo desta primeira funcionalidade: busca de jogos e consulta do preço atual na Steam, em BRL, sem exigir login e sem persistir buscas ou preços. O login continua aplicável às demais funcionalidades que exigirem autenticação.
-Fora do escopo desta funcionalidade: outras lojas, comparação de ofertas, persistência/histórico de preços e autenticação na tela de busca.
+O site oferece cadastro e login por e-mail e senha para encaminhar usuários autenticados às áreas protegidas. A conta fica no banco SQLite próprio da aplicação Reflex; a senha é armazenada como hash com salt, nunca em texto puro. O catálogo protegido é inicialmente um placeholder.
+A busca Steam fica disponível publicamente em `/buscar`, sem exigir login e sem persistir buscas ou preços. A página inicial `/` é o login, e `/cadastro` apresenta a criação de conta.
+Fora do escopo desta etapa: outras lojas, comparação de ofertas, persistência/histórico de preços, recuperação de senha, login externo e papéis/permissões administrativas.
 Fora do escopo inicial: compra direta dentro do site (o usuário é redirecionado à loja escolhida); sistema de avaliação/reputação de lojas.
 
 ## 6. Principais funcionalidades
-- Cadastro/login de usuário para funcionalidades protegidas.
+- Cadastro/login de usuário por e-mail e senha para funcionalidades protegidas.
+- Catálogo placeholder protegido por autenticação.
 - Busca pública de jogo por nome e seleção entre resultados semelhantes.
 - Exibição do preço regional atual da Steam em BRL, distinguindo jogos gratuitos e preços indisponíveis.
 - Processo para uma loja solicitar inclusão no sistema.
@@ -34,18 +36,18 @@ Fora do escopo inicial: compra direta dentro do site (o usuário é redirecionad
 - Novas lojas podem exigir cadastro manual até que uma automação específica seja desenvolvida para elas.
 
 ## 8. Arquitetura tecnológica
-- Backend: Xano (XanoScript) para autenticação, persistência e lógica de negócio das demais funcionalidades.
-- Aplicação web: Reflex (Python); nesta busca pública, a chamada HTTP à Steam é executada no servidor Reflex.
+- Backend: Xano (XanoScript) para lógica de negócio das funcionalidades integradas ao Xano.
+- Aplicação web: Reflex (Python); autenticação desta etapa, persistência de contas em SQLite e busca pública Steam são executadas no servidor Reflex.
 - Integração externa: API pública da Steam para busca de App ID e preço.
-- A busca de preço na Steam não grava no Xano e não mantém cache ou histórico persistente.
+- A busca de preço na Steam não grava no banco Reflex nem no Xano e não mantém cache ou histórico persistente.
 
 ## 9. Princípios de desenvolvimento
 - Priorizar a busca/comparação de preços como núcleo do sistema antes de recursos secundários.
 - Desenvolvimento incremental, guiado pelo OpenSpec.
 
 ## 10. Segurança e integridade
-- Funcionalidades protegidas exigem login; a busca de preço da Steam é pública.
-- Regras de autorização (ex.: quem pode aprovar lojas) devem ser aplicadas no backend (Xano), nunca só no frontend.
+- Funcionalidades protegidas exigem login validado no backend Reflex; a busca de preço da Steam é pública.
+- Regras de autorização devem ser aplicadas no backend responsável pela funcionalidade (Reflex ou Xano), nunca só no frontend.
 
 ## 11. Estratégia de desenvolvimento
 - Desenvolvimento incremental via OpenSpec, começando pela funcionalidade central (busca e comparação de preços).
