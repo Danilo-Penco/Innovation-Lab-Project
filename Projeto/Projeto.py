@@ -1,5 +1,3 @@
-import asyncio
-
 import reflex as rx
 
 from Projeto.auth import (
@@ -9,8 +7,19 @@ from Projeto.auth import (
     register_account,
     verify_credentials,
 )
-from Projeto.catalog import CATALOG_GAMES, CatalogGame, build_steam_search_url
-from Projeto.gog import GogOffer, GogServiceError, search_gog_offer
+from Projeto.catalog import (
+    CATALOG_GAMES,
+    CatalogGame,
+    build_catalog_comparison_url,
+    build_steam_search_url,
+    select_catalog_games,
+)
+from Projeto.gog import (
+    GogMatchResult,
+    GogOffer,
+    GogServiceError,
+    search_gog_offer,
+)
 from Projeto.steam import (
     InvalidSearchTerm,
     SteamGame,
@@ -48,13 +57,54 @@ class SearchState(rx.State):
     _price_request_id: int = 0
 
     @rx.event
-    def set_search_term(self, value: str):
-        self.search_term = value
+    async def set_search_term(self, value: str):
+        await self._load_search_term(value)
+
+    async def _load_search_term(self, term: str):
+        self.search_term = term
+        await self._start_search(term)
 
     @rx.event
-    def initialize_from_query(self):
-        self.search_term = self.router.url.query_parameters.get("term", "")
+    async def initialize_from_query(self):
+        term = self.router.url.query_parameters.get("term", "")
+        await self._load_search_term(term)
+
+    async def _start_search(self, value: str):
+        self.search_term = value
+        self._search_request_id += 1
+        request_id = self._search_request_id
+        self._price_request_id += 1
+        self.games = []
+        self.no_results = False
         self.search_error = ""
+        self.is_searching = False
+        self._clear_comparison()
+
+        if not value.strip():
+            return
+
+        try:
+            term = validate_search_term(value)
+        except InvalidSearchTerm as error:
+            self.search_error = str(error)
+            return
+
+        self.is_searching = True
+        try:
+            games = await search_steam_games(term)
+        except SteamServiceError as error:
+            if request_id == self._search_request_id:
+                self.search_error = str(error)
+                self.is_searching = False
+            return
+
+        if request_id != self._search_request_id:
+            return
+        self.games = games
+        self.no_results = not games
+        self.is_searching = False
+
+    def _clear_comparison(self):
         self.price_error = ""
         self.price_status = ""
         self.price_cents = 0
@@ -67,9 +117,6 @@ class SearchState(rx.State):
         self.gog_error = ""
         self.selected_app_id = 0
         self.selected_name = ""
-        self.games = []
-        self.no_results = False
-        self.is_searching = False
         self.is_loading_price = False
         self.is_loading_gog = False
 
@@ -111,116 +158,85 @@ class SearchState(rx.State):
         )
 
     @rx.event
-    async def search(self):
-        self._search_request_id += 1
-        request_id = self._search_request_id
-        self._price_request_id += 1
-        self.search_error = ""
-        self.price_error = ""
-        self.price_status = ""
-        self.price_cents = 0
-        self.selected_cover_url = ""
-        self.gog_title = ""
-        self.gog_store_url = ""
-        self.gog_cover_url = ""
-        self.gog_status = ""
-        self.gog_price_cents = 0
-        self.gog_error = ""
-        self.selected_app_id = 0
-        self.selected_name = ""
-        self.games = []
-        self.no_results = False
-        self.is_searching = False
-        self.is_loading_price = False
-        self.is_loading_gog = False
-
-        try:
-            term = validate_search_term(self.search_term)
-        except InvalidSearchTerm as error:
-            self.search_error = str(error)
-            return
-
-        self.is_searching = True
-        try:
-            games = await search_steam_games(term)
-        except SteamServiceError as error:
-            if request_id == self._search_request_id:
-                self.search_error = str(error)
-                self.is_searching = False
-            return
-
-        if request_id != self._search_request_id:
-            return
-        self.games = games
-        self.no_results = not games
-        self.is_searching = False
-
-    @rx.event
-    async def select_game(self, app_id: int):
+    def select_game(self, app_id: int):
         game = find_game_by_app_id(self.games, app_id)
         if game is None:
-            self.price_error = "Selecione um jogo da lista de resultados."
+            self.search_error = "Selecione um jogo da lista de resultados."
             return
 
+        return rx.redirect(f"/comparar?app_id={game.app_id}")
+
+    @rx.event
+    async def initialize_comparison(self):
+        raw_app_id = self.router.url.query_parameters.get("app_id", "")
+        await self._load_comparison_from_query(raw_app_id)
+
+    async def _load_comparison_from_query(self, raw_app_id: str):
+        try:
+            app_id = int(raw_app_id)
+        except (TypeError, ValueError):
+            self._clear_comparison()
+            self.price_error = "Jogo inválido. Volte à busca e selecione um resultado."
+            return
+        if app_id <= 0:
+            self._clear_comparison()
+            self.price_error = "Jogo inválido. Volte à busca e selecione um resultado."
+            return
+
+        await self._load_comparison(app_id)
+
+    async def _load_comparison(self, app_id: int):
         self._price_request_id += 1
         request_id = self._price_request_id
-        self.selected_app_id = game.app_id
-        self.selected_name = game.name
-        self.price_error = ""
-        self.price_status = ""
-        self.price_cents = 0
-        self.selected_cover_url = ""
-        self.gog_title = ""
-        self.gog_store_url = ""
-        self.gog_cover_url = ""
-        self.gog_status = ""
-        self.gog_price_cents = 0
-        self.gog_error = ""
+        self._clear_comparison()
+        self.selected_app_id = app_id
         self.is_loading_price = True
-        self.is_loading_gog = True
 
-        steam_result, gog_result = await asyncio.gather(
-            get_steam_game_price(game.app_id),
-            search_gog_offer(game.name),
-            return_exceptions=True,
-        )
+        try:
+            steam_result = await get_steam_game_price(app_id)
+        except SteamServiceError as error:
+            if request_id == self._price_request_id:
+                self.price_error = str(error)
+            return
+        finally:
+            if request_id == self._price_request_id:
+                self.is_loading_price = False
 
-        if (
-            request_id != self._price_request_id
-            or self.selected_app_id != game.app_id
-        ):
+        if request_id != self._price_request_id or self.selected_app_id != app_id:
             return
 
-        if isinstance(steam_result, SteamServiceError):
-            self.price_error = str(steam_result)
-        elif isinstance(steam_result, BaseException):
-            self.is_loading_price = False
-            self.is_loading_gog = False
-            raise steam_result
-        else:
-            self._apply_steam_price(steam_result)
+        self._apply_steam_price(steam_result)
+        self.is_loading_gog = True
 
-        if isinstance(gog_result, GogServiceError):
-            self.gog_error = (
-                "A comparação com a GOG está indisponível no momento."
-            )
-        elif isinstance(gog_result, BaseException):
-            self.is_loading_price = False
-            self.is_loading_gog = False
-            raise gog_result
-        elif gog_result is None:
-            self.gog_error = (
-                "Não foi encontrada uma correspondência única na GOG."
-            )
-        elif gog_result.status == "unavailable":
-            self.gog_error = (
-                "A GOG não informou um preço regional disponível em BRL."
-            )
+        try:
+            gog_result = await search_gog_offer(steam_result.name)
+        except GogServiceError:
+            if request_id == self._price_request_id:
+                self.gog_error = (
+                    "A comparação com a GOG está indisponível no momento."
+                )
         else:
-            self._apply_gog_offer(gog_result)
-
-        self.is_loading_price = False
-        self.is_loading_gog = False
+            if (
+                request_id != self._price_request_id
+                or self.selected_app_id != app_id
+            ):
+                return
+            if gog_result.status == "not_found":
+                self.gog_error = "Jogo não encontrado na GOG."
+            elif gog_result.status == "ambiguous":
+                self.gog_error = "Mais de uma possível correspondência na GOG."
+            elif (
+                gog_result.offer is not None
+                and gog_result.offer.status == "unavailable"
+            ):
+                self.gog_error = "Sem preço em BRL na GOG."
+            elif gog_result.offer is not None:
+                self._apply_gog_offer(gog_result.offer)
+            else:
+                self.gog_error = "A comparação com a GOG está indisponível no momento."
+        finally:
+            if request_id == self._price_request_id:
+                self.is_loading_gog = False
 
     def _apply_steam_price(self, price: SteamPrice):
         self.price_status = price.status
@@ -250,6 +266,10 @@ class AuthState(rx.State):
     def catalog_authorized(self) -> bool:
         return self._catalog_authorized
 
+    @rx.var
+    def is_authenticated(self) -> bool:
+        return isinstance(self._user_id, int) and not isinstance(self._user_id, bool)
+
     @rx.event
     def set_email(self, value: str):
         self.email = value
@@ -276,6 +296,17 @@ class AuthState(rx.State):
     def prepare_form(self):
         self.auth_error = ""
         self.password = ""
+
+    @rx.event
+    def logout(self):
+        self._user_id = None
+        self._catalog_authorized = False
+        self.is_splash_visible = False
+        self.is_submitting = False
+        self.email = ""
+        self.password = ""
+        self.auth_error = ""
+        return rx.redirect("/")
 
     def _start_authenticated_transition(self, user_id: int):
         self._user_id = user_id
@@ -333,10 +364,15 @@ class AuthState(rx.State):
 class CatalogState(rx.State):
     search_term: str = ""
     search_error: str = ""
+    visible_app_ids: list[int] = []
+    featured_app_id: int = 0
 
     @rx.event
     def prepare_page(self):
         self.search_error = ""
+        selected, featured = select_catalog_games()
+        self.visible_app_ids = [game.app_id for game in selected]
+        self.featured_app_id = featured.app_id
 
     @rx.event
     def set_search_term(self, value: str):
@@ -369,6 +405,11 @@ GLOBAL_CSS = """
 .auth-card {
     animation: fadeIn 0.5s ease-out, glow 2.4s ease-in-out infinite;
 }
+@media (max-height: 720px) {
+    .auth-card {
+        padding: 1rem !important;
+    }
+}
 .price-comparison-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
@@ -380,22 +421,40 @@ GLOBAL_CSS = """
 
 def navbar() -> rx.Component:
     return rx.hstack(
-        rx.hstack(
-            rx.icon("gamepad-2", color="var(--violet-9)", size=22),
-            rx.text("ComparaKeys", weight="bold", size="4"),
-            align="center",
-            spacing="2",
+        rx.link(
+            rx.hstack(
+                rx.icon("gamepad-2", color="var(--violet-9)", size=22),
+                rx.text("ComparaKeys", weight="bold", size="4"),
+                align="center",
+                spacing="2",
+            ),
+            href="/catalogo",
+            color="inherit",
+            text_decoration="none",
         ),
         rx.spacer(),
-        rx.button(
-            "Entrar",
-            on_click=rx.redirect("/"),
-            variant="outline",
-            size="2",
-            style={
-                "cursor": "pointer",
-                "_hover": {"background_color": "var(--violet-3)"},
-            },
+        rx.cond(
+            AuthState.is_authenticated,
+            rx.button(
+                "Sair",
+                on_click=AuthState.logout,
+                variant="outline",
+                size="2",
+                style={
+                    "cursor": "pointer",
+                    "_hover": {"background_color": "var(--violet-3)"},
+                },
+            ),
+            rx.button(
+                "Entrar",
+                on_click=rx.redirect("/"),
+                variant="outline",
+                size="2",
+                style={
+                    "cursor": "pointer",
+                    "_hover": {"background_color": "var(--violet-3)"},
+                },
+            ),
         ),
         width="100%",
         padding="1rem 2rem",
@@ -587,29 +646,62 @@ def price_comparison() -> rx.Component:
     )
 
 
-def catalog_game_card(game: CatalogGame) -> rx.Component:
-    return rx.box(
-        rx.image(
-            src=game.cover_url,
-            alt=f"Capa de {game.name}",
+def catalog_game_card(game: CatalogGame, featured: bool = False) -> rx.Component:
+    cover_height = "320px" if featured else "170px"
+    return rx.link(
+        rx.box(
+            rx.box(
+                rx.image(
+                    src=game.cover_url,
+                    alt=f"Capa de {game.name}",
+                    id=f"catalog-cover-{game.app_id}",
+                    width="100%",
+                    height=cover_height,
+                    object_fit="cover",
+                    border_radius="14px",
+                    background="linear-gradient(135deg, #39235c, #130e1c)",
+                    loading="lazy",
+                ),
+                rx.center(
+                    rx.text(
+                        game.name,
+                        color="white",
+                        weight="medium",
+                        size="5" if featured else "3",
+                        text_align="center",
+                        padding="1rem",
+                    ),
+                    width="100%",
+                    height=cover_height,
+                    border_radius="14px",
+                    background="linear-gradient(135deg, #39235c, #130e1c)",
+                    id=f"catalog-fallback-{game.app_id}",
+                    display="none",
+                    role="img",
+                    aria_label=f"Capa indisponível: {game.name}",
+                ),
+                position="relative",
+                width="100%",
+            ),
+            rx.text(
+                game.name,
+                color="white",
+                weight="medium",
+                size="6" if featured else "4",
+                margin_top="0.8rem",
+            ),
             width="100%",
-            height="170px",
-            object_fit="cover",
-            border_radius="14px",
-            background="linear-gradient(135deg, #39235c, #130e1c)",
-            loading="lazy",
+            padding="1rem" if featured else "0.85rem",
+            border="1px solid #48336a",
+            border_radius="18px",
+            background="rgba(17, 13, 26, 0.94)",
+            box_shadow="0 0 34px rgba(139, 92, 246, 0.22)" if featured else "none",
         ),
-        rx.text(
-            game.name,
-            color="white",
-            weight="medium",
-            margin_top="0.8rem",
-        ),
+        href=build_catalog_comparison_url(game.app_id),
         width="100%",
-        padding="0.85rem",
-        border="1px solid #48336a",
-        border_radius="18px",
-        background="rgba(17, 13, 26, 0.94)",
+        aria_label=f"Comparar preços de {game.name}",
+        text_decoration="none",
+        color="inherit",
     )
 
 
@@ -630,32 +722,27 @@ def steam_search() -> rx.Component:
                         ),
                         rx.heading("Encontre seu próximo jogo", size="8"),
                         rx.text(
-                            "Pesquise na Steam e consulte o preço atual para o Brasil.",
+                            "Digite para encontrar jogos e comparar preços atuais no Brasil.",
                             color="gray",
                             size="4",
                         ),
-                        rx.hstack(
-                            rx.input(
-                                value=SearchState.search_term,
-                                on_change=SearchState.set_search_term,
-                                placeholder="Digite o nome de um jogo",
-                                aria_label="Nome do jogo",
-                                max_length=100,
-                                size="3",
-                                width="100%",
-                            ),
-                            rx.button(
-                                rx.cond(SearchState.is_searching, "Buscando...", "Buscar"),
-                                on_click=SearchState.search,
-                                is_disabled=SearchState.is_searching,
-                                size="3",
-                                style={
-                                    "cursor": "pointer",
-                                    "_hover": {"opacity": "0.85"},
-                                },
-                            ),
-                            align="center",
+                        rx.input(
+                            value=SearchState.search_term,
+                            on_change=SearchState.set_search_term,
+                            placeholder="Digite o nome de um jogo",
+                            aria_label="Nome do jogo",
+                            max_length=100,
+                            size="3",
                             width="100%",
+                        ),
+                        rx.cond(
+                            SearchState.is_searching,
+                            rx.hstack(
+                                rx.spinner(),
+                                rx.text("Buscando jogos na Steam..."),
+                                align="center",
+                            ),
+                            rx.fragment(),
                         ),
                         rx.cond(
                             SearchState.search_error != "",
@@ -678,11 +765,6 @@ def steam_search() -> rx.Component:
                             ),
                             rx.fragment(),
                         ),
-                        rx.cond(
-                            SearchState.selected_app_id > 0,
-                            price_comparison(),
-                            rx.fragment(),
-                        ),
                         align="stretch",
                         spacing="5",
                         width="100%",
@@ -701,8 +783,48 @@ def steam_search() -> rx.Component:
     )
 
 
-def auth_brand() -> rx.Component:
-    return rx.vstack(
+def price_comparison_page() -> rx.Component:
+    return rx.fragment(
+        rx.html(f"<style>{GLOBAL_CSS}</style>"),
+        rx.vstack(
+            navbar(),
+            rx.center(
+                rx.box(
+                    rx.vstack(
+                        rx.button(
+                            "Voltar à busca",
+                            on_click=rx.redirect("/buscar"),
+                            variant="outline",
+                            size="2",
+                            align_self="start",
+                        ),
+                        rx.heading("Comparação de preços", size="7"),
+                        rx.cond(
+                            SearchState.selected_name != "",
+                            rx.text(SearchState.selected_name, color="gray"),
+                            rx.fragment(),
+                        ),
+                        price_comparison(),
+                        align="stretch",
+                        spacing="5",
+                        width="100%",
+                    ),
+                    max_width="920px",
+                    width="100%",
+                    padding="2rem",
+                    class_name="fade-in",
+                ),
+                width="100%",
+                padding="1rem",
+            ),
+            width="100%",
+            spacing="0",
+        ),
+    )
+
+
+def auth_brand(clickable: bool = False) -> rx.Component:
+    brand = rx.vstack(
         rx.icon("gamepad-2", size=38, color="#a78bfa"),
         rx.text(
             "COMPARAKEYS",
@@ -714,6 +836,14 @@ def auth_brand() -> rx.Component:
         align="center",
         spacing="2",
     )
+    if clickable:
+        return rx.link(
+            brand,
+            href="/catalogo",
+            color="inherit",
+            text_decoration="none",
+        )
+    return brand
 
 
 def splash_screen() -> rx.Component:
@@ -803,7 +933,7 @@ def login_card() -> rx.Component:
         ),
         width="100%",
         max_width="440px",
-        padding="2rem",
+        padding="clamp(1rem, 3vh, 1.5rem)",
         border="1px solid #48336a",
         border_radius="24px",
         background="rgba(17, 13, 26, 0.94)",
@@ -814,7 +944,7 @@ def login_card() -> rx.Component:
 def register_card() -> rx.Component:
     return rx.box(
         rx.vstack(
-            auth_brand(),
+            auth_brand(clickable=True),
             rx.heading("Crie sua conta", size="6", color="white"),
             rx.text(
                 "Use seu e-mail e uma senha para se cadastrar.",
@@ -885,7 +1015,7 @@ def register_card() -> rx.Component:
         ),
         width="100%",
         max_width="440px",
-        padding="2rem",
+        padding="clamp(1rem, 3vh, 1.5rem)",
         border="1px solid #48336a",
         border_radius="24px",
         background="rgba(17, 13, 26, 0.94)",
@@ -903,7 +1033,7 @@ def login_page() -> rx.Component:
                 login_card(),
                 width="100%",
                 min_height="100vh",
-                padding="1.25rem",
+                padding="0.75rem",
                 background="radial-gradient(circle at 50% 25%, #261442 0%, #0b0910 54%, #050407 100%)",
             ),
         ),
@@ -920,7 +1050,7 @@ def register_page() -> rx.Component:
                 register_card(),
                 width="100%",
                 min_height="100vh",
-                padding="1.25rem",
+                padding="0.75rem",
                 background="radial-gradient(circle at 50% 25%, #261442 0%, #0b0910 54%, #050407 100%)",
             ),
         ),
@@ -930,6 +1060,7 @@ def register_page() -> rx.Component:
 def catalog_page() -> rx.Component:
     return rx.fragment(
         rx.html(f"<style>{GLOBAL_CSS}</style>"),
+        rx.script(src="/catalog-image-fallback.js"),
         rx.cond(
             AuthState.catalog_authorized,
             rx.vstack(
@@ -970,11 +1101,28 @@ def catalog_page() -> rx.Component:
                             "Conheça alguns jogos e pesquise na Steam.",
                             color="#b8afc8",
                         ),
-                        rx.grid(
+                        rx.box(
                             *[
-                                catalog_game_card(game)
+                                rx.cond(
+                                    CatalogState.featured_app_id == game.app_id,
+                                    catalog_game_card(game, featured=True),
+                                    rx.fragment(),
+                                )
                                 for game in CATALOG_GAMES
                             ],
+                            width="100%",
+                        ),
+                        rx.grid(
+                            *[
+                                rx.cond(
+                                    CatalogState.visible_app_ids.contains(game.app_id)
+                                    & (CatalogState.featured_app_id != game.app_id),
+                                    catalog_game_card(game),
+                                    rx.fragment(),
+                                )
+                                for game in CATALOG_GAMES
+                            ],
+                            id="catalog-games-grid",
                             width="100%",
                             style={
                                 "gridTemplateColumns": (
@@ -982,6 +1130,27 @@ def catalog_page() -> rx.Component:
                                 ),
                                 "gap": "1rem",
                             },
+                        ),
+                        rx.hstack(
+                            rx.text(
+                                "ComparaKeys ajuda você a encontrar onde jogar pagando menos.",
+                                color="#b8afc8",
+                                size="2",
+                            ),
+                            rx.link(
+                                "Buscar jogos",
+                                href="/buscar",
+                                color="#c4b5fd",
+                                weight="medium",
+                            ),
+                            id="catalog-footer",
+                            width="100%",
+                            justify="between",
+                            align="center",
+                            flex_wrap="wrap",
+                            border_top="1px solid #48336a",
+                            padding_top="1rem",
+                            margin_top="1rem",
                         ),
                         width="100%",
                         max_width="1100px",
@@ -1016,3 +1185,8 @@ app.add_page(
     on_load=[AuthState.guard_catalog, CatalogState.prepare_page],
 )
 app.add_page(steam_search, route="/buscar", on_load=SearchState.initialize_from_query)
+app.add_page(
+    price_comparison_page,
+    route="/comparar",
+    on_load=SearchState.initialize_comparison,
+)

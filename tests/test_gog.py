@@ -4,6 +4,7 @@ import httpx
 
 from Projeto.gog import (
     GOG_CATALOG_URL,
+    GogMatchResult,
     GogServiceError,
     normalize_title,
     parse_catalog_results,
@@ -37,11 +38,13 @@ class GogCatalogParsingTests(unittest.TestCase):
         self.assertEqual(normalize_title("  BALDUR'S   GATE 3 "), "baldur's gate 3")
 
     def test_exact_normalized_title_returns_brl_offer(self) -> None:
-        offer = parse_catalog_results(
+        result = parse_catalog_results(
             {"products": [gog_product()]},
             "  baldur's   gate 3 ",
         )
 
+        self.assertEqual(result.status, "matched")
+        offer = result.offer
         self.assertIsNotNone(offer)
         assert offer is not None
         self.assertEqual(offer.product_id, "1456460669")
@@ -58,33 +61,43 @@ class GogCatalogParsingTests(unittest.TestCase):
         )
 
     def test_missing_and_ambiguous_exact_matches_return_no_offer(self) -> None:
-        self.assertIsNone(parse_catalog_results({"products": []}, "Baldur's Gate 3"))
-        self.assertIsNone(
+        self.assertEqual(
+            parse_catalog_results({"products": []}, "Baldur's Gate 3").status,
+            "not_found",
+        )
+        self.assertEqual(
             parse_catalog_results(
                 {"products": [gog_product(), gog_product()]},
                 "Baldur's Gate 3",
-            )
+            ).status,
+            "ambiguous",
         )
 
-    def test_non_exact_and_non_game_results_are_not_matches(self) -> None:
-        self.assertIsNone(
+    def test_unique_edition_match_is_accepted_but_non_game_is_ignored(self) -> None:
+        result = parse_catalog_results(
+            {"products": [gog_product(title="Baldur's Gate 3 Deluxe Edition")]},
+            "Baldur's Gate 3",
+        )
+
+        self.assertEqual(result.status, "matched")
+        self.assertIsNotNone(result.offer)
+        assert result.offer is not None
+        self.assertEqual(result.offer.title, "Baldur's Gate 3 Deluxe Edition")
+        self.assertEqual(
             parse_catalog_results(
-                {
-                    "products": [
-                        gog_product(title="Baldur's Gate 3 Deluxe Edition"),
-                        {**gog_product(), "productType": "dlc"},
-                    ]
-                },
+                {"products": [{**gog_product(), "productType": "dlc"}]},
                 "Baldur's Gate 3",
-            )
+            ).status,
+            "not_found",
         )
 
     def test_free_game_is_zero_brl(self) -> None:
-        offer = parse_catalog_results(
+        result = parse_catalog_results(
             {"products": [gog_product(amount="0.00")]},
             "Baldur's Gate 3",
         )
 
+        offer = result.offer
         self.assertIsNotNone(offer)
         assert offer is not None
         self.assertEqual(offer.status, "free")
@@ -99,10 +112,11 @@ class GogCatalogParsingTests(unittest.TestCase):
         ]
         for product in cases:
             with self.subTest(product=product):
-                offer = parse_catalog_results(
+                result = parse_catalog_results(
                     {"products": [product]},
                     "Baldur's Gate 3",
                 )
+                offer = result.offer
                 self.assertIsNotNone(offer)
                 assert offer is not None
                 self.assertEqual(offer.status, "unavailable")
@@ -150,7 +164,79 @@ class GogHttpTests(unittest.IsolatedAsyncioTestCase):
             "  Baldur's Gate 3  ",
             transport=httpx.MockTransport(respond),
         )
-        self.assertIsNotNone(offer)
+        self.assertEqual(offer.status, "matched")
+
+    async def test_silksong_retries_without_punctuation_and_matches_brl_offer(self) -> None:
+        requested_queries: list[str] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            query = request.url.params["query"]
+            requested_queries.append(query)
+            products = (
+                [gog_product(title="Hollow Knight: Silksong", amount="59.99")]
+                if query == "Hollow Knight Silksong"
+                else [gog_product(title="Concubine", amount="24.75")]
+            )
+            return httpx.Response(200, json={"products": products}, request=request)
+
+        result = await search_gog_offer(
+            "Hollow Knight: Silksong",
+            transport=httpx.MockTransport(respond),
+        )
+
+        self.assertEqual(
+            requested_queries,
+            ["Hollow Knight: Silksong", "Hollow Knight Silksong"],
+        )
+        self.assertEqual(result.status, "matched")
+        self.assertIsNotNone(result.offer)
+        assert result.offer is not None
+        self.assertEqual(result.offer.title, "Hollow Knight: Silksong")
+        self.assertEqual(result.offer.final_price_minor, 5999)
+
+    def test_exact_title_precedes_approximate_matches(self) -> None:
+        result = parse_catalog_results(
+            {
+                "products": [
+                    gog_product(title="Hollow Knight: Silksong - Deluxe Edition"),
+                    gog_product(title="Hollow Knight: Silksong"),
+                ]
+            },
+            "Hollow Knight: Silksong",
+        )
+
+        self.assertEqual(result.status, "matched")
+        self.assertIsNotNone(result.offer)
+        assert result.offer is not None
+        self.assertEqual(result.offer.title, "Hollow Knight: Silksong")
+
+    def test_unique_approximate_match_ignores_common_edition_suffix(self) -> None:
+        result = parse_catalog_results(
+            {
+                "products": [
+                    gog_product(
+                        title="Hollow Knight: Silksong - Deluxe Edition",
+                    )
+                ]
+            },
+            "Hollow Knight: Silksong",
+        )
+
+        self.assertEqual(result.status, "matched")
+        self.assertIsNotNone(result.offer)
+
+    def test_multiple_approximate_matches_are_ambiguous(self) -> None:
+        products = [
+            gog_product(title="Hollow Knight: Silksong Deluxe Edition"),
+            {**gog_product(title="Hollow Knight: Silksong Complete Edition"), "id": "2"},
+        ]
+        result = parse_catalog_results(
+            {"products": products},
+            "Hollow Knight: Silksong",
+        )
+
+        self.assertEqual(result.status, "ambiguous")
+        self.assertIsNone(result.offer)
 
     async def test_http_status_invalid_json_and_timeout_raise_recoverable_errors(self) -> None:
         transports = [

@@ -7,7 +7,7 @@ Esta capacidade permite que usuários criem uma conta e entrem no ComparaKeys an
 ## Requirements
 
 ### Requirement: Página inicial de login
-O sistema SHALL apresentar a tela de login como primeira página do site, com campos de e-mail e senha, uma ação explícita para entrar e o botão “Cadastrar-se” imediatamente abaixo do campo de senha. A interface de autenticação SHALL usar um fundo com cores preto e roxo e SHALL ser utilizável em telas estreitas e largas.
+O sistema SHALL apresentar a tela de login como primeira página do site, com campos de e-mail e senha, uma ação explícita para entrar e o botão “Cadastrar-se” imediatamente abaixo do campo de senha. A interface de autenticação SHALL usar um fundo com cores preto e roxo e SHALL ser utilizável em telas estreitas e largas. Os formulários de login e cadastro SHALL ficar centralizados na área visível da tela, com espaçamento superior reduzido, sem exigir rolagem vertical em tamanhos comuns de desktop e celular.
 
 #### Scenario: Acesso inicial sem sessão
 - **WHEN** uma pessoa sem sessão autenticada abre a raiz do site
@@ -16,6 +16,14 @@ O sistema SHALL apresentar a tela de login como primeira página do site, com ca
 #### Scenario: Abrir cadastro
 - **WHEN** a pessoa seleciona “Cadastrar-se”
 - **THEN** o sistema apresenta o formulário de criação de conta com campos de e-mail e senha e uma ação para concluir o cadastro
+
+#### Scenario: Formulário centralizado em desktop
+- **WHEN** uma pessoa abre a tela de login ou cadastro em uma janela desktop comum
+- **THEN** o formulário aparece centralizado vertical e horizontalmente e fica visível sem rolagem vertical
+
+#### Scenario: Formulário centralizado em celular
+- **WHEN** uma pessoa abre a tela de login ou cadastro em uma tela de celular comum
+- **THEN** o formulário usa espaçamento compacto, aparece centralizado e fica visível sem rolagem vertical
 
 ### Requirement: Cadastro com credenciais próprias
 O sistema SHALL permitir criar uma conta usando e-mail e senha, normalizar o e-mail removendo espaços externos e ignorando diferenças entre maiúsculas e minúsculas, validar seu formato e exigir senha entre 8 e 128 caracteres. O sistema SHALL rejeitar e-mails normalizados já cadastrados e armazenar a conta no banco de dados próprio da aplicação Reflex. O sistema SHALL NOT enviar credenciais ao Xano nem armazenar a senha em texto puro.
@@ -75,3 +83,41 @@ A busca pública de jogos e preços Steam SHALL permanecer acessível em rota pr
 #### Scenario: Acessar busca sem sessão
 - **WHEN** uma pessoa sem autenticação abre a rota própria de busca Steam
 - **THEN** o sistema permite pesquisar jogos e consultar preços conforme a capacidade `steam-price-search`
+
+### Requirement: Ações da sessão no cabeçalho
+O cabeçalho SHALL mostrar “Entrar” somente quando não houver sessão autenticada e SHALL mostrar “Sair” quando houver uma sessão autenticada. Essa regra SHALL ser respeitada também nas rotas públicas que exibem o cabeçalho, incluindo `/buscar`. A ação “Sair” SHALL encerrar a sessão no backend e retornar a pessoa à página de login.
+
+#### Scenario: Cabeçalho sem sessão
+- **WHEN** uma pessoa sem sessão autenticada abre uma tela que apresenta o cabeçalho
+- **THEN** o cabeçalho mostra “Entrar” e não mostra “Sair”
+
+#### Scenario: Cabeçalho com sessão
+- **WHEN** uma pessoa autenticada abre uma tela que apresenta o cabeçalho, inclusive `/buscar`
+- **THEN** o cabeçalho mostra “Sair” e não mostra “Entrar”
+
+#### Scenario: Encerrar sessão pelo cabeçalho
+- **WHEN** uma pessoa autenticada seleciona “Sair”
+- **THEN** o sistema invalida a identidade autenticada e retorna à tela de login
+
+#### Scenario: Encerrar sessão em rota pública
+- **WHEN** uma pessoa autenticada seleciona “Sair” enquanto está em `/buscar`
+- **THEN** o sistema encerra a sessão, retorna à tela de login e mantém `/buscar` acessível sem autenticação
+
+### Requirement: Navegação pela marca ComparaKeys
+A marca visual “ComparaKeys” SHALL navegar para `/catalogo` quando selecionada nas telas que a exibem, incluindo cadastro, catálogo, busca pública e comparação de preços. Na tela de login em `/`, a marca SHALL permanecer como texto e ícone sem link ou ação de navegação. A proteção existente de `/catalogo` SHALL continuar redirecionando para o login uma pessoa sem sessão autenticada.
+
+#### Scenario: Marca sem navegação na tela de login
+- **WHEN** uma pessoa abre `/`
+- **THEN** a marca ComparaKeys aparece sem link nem ação clicável
+
+#### Scenario: Navegar pelo logo no cadastro
+- **WHEN** uma pessoa seleciona a marca ComparaKeys em `/cadastro`
+- **THEN** o sistema navega para `/catalogo`
+
+#### Scenario: Navegar pela marca nas telas com cabeçalho
+- **WHEN** uma pessoa seleciona a marca ComparaKeys em `/catalogo`, `/buscar` ou na rota de comparação
+- **THEN** o sistema navega para `/catalogo`
+
+#### Scenario: Proteção do catálogo ao navegar sem sessão
+- **WHEN** uma pessoa sem sessão seleciona a marca ComparaKeys em uma rota pública e chega a `/catalogo`
+- **THEN** o sistema não apresenta o catálogo protegido e redireciona a pessoa para `/`
