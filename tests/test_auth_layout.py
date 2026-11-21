@@ -34,6 +34,27 @@ class AuthenticationLayoutTests(unittest.TestCase):
         self.assertIn("/catalogo", repr(auth_brand(clickable=True)))
         self.assertIn("/catalogo", repr(register_card()))
 
+    def test_registration_requires_name(self) -> None:
+        registration = repr(register_card())
+        self.assertIn("Nome", registration)
+        self.assertIn("required", registration)
+
+    def test_password_rule_and_accessible_visibility_control_on_both_forms(self) -> None:
+        for card_factory, hint_id in (
+            (login_card, "login-password-rule"),
+            (register_card, "register-password-rule"),
+        ):
+            with self.subTest(card=card_factory.__name__):
+                component = repr(card_factory())
+                self.assertIn("password_visible", component)
+                self.assertIn("Mostrar senha", component)
+                self.assertIn("Ocultar senha", component)
+                self.assertIn("aria-label", component)
+                self.assertIn(hint_id, component)
+                self.assertIn("caracteres e ao menos uma letra", component)
+
+        self.assertIn(":focus-visible", GLOBAL_CSS)
+
 
 if __name__ == "__main__":
     unittest.main()

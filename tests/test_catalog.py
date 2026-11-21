@@ -5,9 +5,11 @@ from unittest.mock import call, patch
 
 from Projeto.Projeto import (
     CatalogState,
+    GLOBAL_CSS,
     catalog_game_card,
     catalog_page,
     navbar,
+    price_comparison,
     price_comparison_page,
     steam_search,
 )
@@ -116,6 +118,22 @@ class CatalogTests(unittest.TestCase):
         for page_factory in (catalog_page, steam_search, price_comparison_page):
             with self.subTest(page=page_factory.__name__):
                 self.assertIn("/catalogo", repr(page_factory()))
+
+    def test_shared_layout_has_responsive_keyboard_and_reduced_motion_styles(self) -> None:
+        self.assertIn("clamp(0.75rem, 4vw, 2rem)", repr(navbar()))
+        self.assertIn("catalog-search", repr(catalog_page()))
+        self.assertIn("@media (max-width: 600px)", GLOBAL_CSS)
+        self.assertIn("prefers-reduced-motion: reduce", GLOBAL_CSS)
+        self.assertIn(":focus-visible", GLOBAL_CSS)
+
+    def test_search_and_comparison_announce_states_and_cheapest_price(self) -> None:
+        search_page = repr(steam_search())
+        comparison = repr(price_comparison())
+
+        self.assertIn('role:\\"status\\"', search_page)
+        self.assertIn('role:\\"alert\\"', search_page)
+        self.assertIn('role:\\"status\\"', comparison)
+        self.assertIn("Menor pre\\\\u00e7o", comparison)
 
     def test_search_url_rejects_blank_and_oversized_terms(self) -> None:
         for term in ("  \t", "x" * 101):

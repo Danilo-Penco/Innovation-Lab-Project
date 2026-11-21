@@ -4,6 +4,7 @@ import httpx
 
 from Projeto.gog import (
     GOG_CATALOG_URL,
+    _METADATA_CACHE,
     GogMatchResult,
     GogServiceError,
     normalize_title,
@@ -144,6 +145,9 @@ class GogCatalogParsingTests(unittest.TestCase):
 
 
 class GogHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        _METADATA_CACHE.clear()
+
     async def test_search_uses_public_brazil_catalog_parameters(self) -> None:
         def respond(request: httpx.Request) -> httpx.Response:
             self.assertEqual(str(request.url.copy_with(query=None)), GOG_CATALOG_URL)
@@ -193,6 +197,42 @@ class GogHttpTests(unittest.IsolatedAsyncioTestCase):
         assert result.offer is not None
         self.assertEqual(result.offer.title, "Hollow Knight: Silksong")
         self.assertEqual(result.offer.final_price_minor, 5999)
+
+    async def test_cached_metadata_never_reuses_a_previous_gog_price(self) -> None:
+        prices = iter(("25.00", "18.50"))
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                json={
+                    "products": [
+                        gog_product(
+                            title="Test Game",
+                            amount=next(prices),
+                        )
+                    ]
+                },
+                request=request,
+            )
+
+        transport = httpx.MockTransport(respond)
+        first = await search_gog_offer("Test Game", transport=transport)
+        second = await search_gog_offer(" test game ", transport=transport)
+
+        self.assertEqual(len(requests), 2)
+        self.assertIsNotNone(first.offer)
+        self.assertIsNotNone(second.offer)
+        assert first.offer is not None and second.offer is not None
+        self.assertEqual(first.offer.final_price_minor, 2500)
+        self.assertEqual(second.offer.final_price_minor, 1850)
+        cached_metadata = _METADATA_CACHE.get(
+            ("test game", "en-US", "BRL", "BR")
+        )
+        self.assertIsNotNone(cached_metadata)
+        assert cached_metadata is not None
+        self.assertFalse(hasattr(cached_metadata, "final_price_minor"))
 
     def test_exact_title_precedes_approximate_matches(self) -> None:
         result = parse_catalog_results(

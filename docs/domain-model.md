@@ -10,21 +10,24 @@ SolicitaçãoDeLoja
  - quando aprovada por um admin, origina uma Loja
 
 ## Usuário
-Representa uma pessoa que usa as funcionalidades autenticadas do ComparaKeys. O cadastro e o login desta etapa usam o banco SQLite próprio da aplicação Reflex; a busca ao vivo e comparação pública Steam/GOG podem ser usadas sem conta.
+Representa uma pessoa que usa as funcionalidades autenticadas do ComparaKeys. O cadastro e o login usam os endpoints existentes de autenticação do Xano e persistem a conta na tabela `user`; a busca ao vivo e comparação pública Steam/GOG podem ser usadas sem conta.
 ### Principais informações
 - identificador da conta
-- e-mail normalizado (único, sem distinção entre maiúsculas e minúsculas)
-- salt e hash da senha (a senha em texto puro não é persistida)
+- nome
+- e-mail
+- papel retornado pelo Xano (sem papéis administrativos definidos nesta etapa)
 
 ### Autenticação e escopo atual
-- A sessão Reflex mantém somente a identidade da conta no estado do servidor.
+- O cadastro envia Nome, e-mail e senha a `auth/signup`; o Nome é obrigatório no Reflex. O login envia e-mail e senha a `auth/login`.
+- A sessão Reflex mantém o `authToken` apenas no estado server-side e sobrevive à recarga completa do navegador. O backend valida novamente o token por `auth/me` em cada carregamento de `/catalogo`; token inválido encerra a sessão e falha de conexão não libera o conteúdo protegido. O token Xano não é gravado em `localStorage`, `sessionStorage` ou URL.
+- Senhas e contas não são persistidas no SQLite da aplicação Reflex. Não há migração de contas locais.
 - O cabeçalho mostra “Entrar” sem identidade autenticada e “Sair” com a sessão ativa; a saída limpa a identidade e redireciona para a tela de login, inclusive na rota pública `/buscar`.
 - Papéis de usuário/admin, recuperação de senha e login externo não fazem parte desta etapa.
 - O catálogo é protegido e mantém uma lista fixa de pelo menos 12 exemplos com capas e App IDs Steam. A cada carregamento, apresenta oito jogos sorteados, com um destaque e os demais em grade; texto alternativo e fallback pelo nome mantêm a identificação acessível mesmo quando uma capa falha. Todos os cards abrem `/comparar?app_id=<id>` usando o identificador Steam do jogo; após a grade há um texto institucional e um link para `/buscar`. Esses exemplos não correspondem a ofertas verificadas nem são persistidos. A busca pública Steam atualiza os resultados conforme a digitação em `/buscar`; a seleção também abre a comparação em rota dedicada.
-- A GOG prioriza um título normalizado idêntico entre produtos do tipo jogo. Sem resultado exato, pode usar uma única correspondência por prefixo/contenção após ignorar qualificadores comuns de edição; nenhuma ou múltiplas correspondências não são escolhidas. Ausência, ambiguidade e preço sem BRL são comunicados separadamente, e a oferta Steam permanece disponível.
+- A GOG prioriza um título normalizado idêntico entre produtos do tipo jogo. Sem resultado exato, pode usar uma única correspondência por prefixo/contenção após ignorar qualificadores comuns de edição; nenhuma ou múltiplas correspondências não são escolhidas. Metadados de identificação podem ficar em cache na memória por até 5 minutos, mas cada comparação consulta a resposta atual e nunca reutiliza preço cacheado. Ausência, ambiguidade e preço sem BRL são comunicados separadamente, e a oferta Steam permanece disponível.
 
 ## Jogo
-Representa um jogo pesquisável. Os cards ilustrativos do catálogo são selecionados aleatoriamente a cada carregamento a partir de uma lista fixa com pelo menos 12 exemplos, e não constituem um catálogo persistido ou uma indicação de preço, popularidade ou promoção atual. Cada exemplo inclui App ID Steam e seu card abre a comparação dedicada por esse identificador. Na busca pública, o jogo é resolvido a cada consulta na Steam (nome → App ID). Ao escolher um resultado, sua comparação é aberta em uma rota dedicada e identificada pelo App ID; a oferta GOG é procurada pelo título retornado pela Steam, sem persistência ou cache.
+Representa um jogo pesquisável. Os cards ilustrativos do catálogo são selecionados aleatoriamente a cada carregamento a partir de uma lista fixa com pelo menos 12 exemplos, e não constituem um catálogo persistido ou uma indicação de preço, popularidade ou promoção atual. Cada exemplo inclui App ID Steam e seu card abre a comparação dedicada por esse identificador. Na busca pública, o jogo é resolvido na Steam (nome → App ID); resultados de busca podem ser reutilizados por até 5 minutos em cache volátil do processo. Ao escolher um resultado, sua comparação é aberta em uma rota dedicada e identificada pelo App ID; a oferta GOG é procurada pelo título retornado pela Steam, com cache apenas de metadados de identificação por até 5 minutos e sem persistência.
 ### Principais informações
 - nome
 - identificador na Steam (Steam App ID)

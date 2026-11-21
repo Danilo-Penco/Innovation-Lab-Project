@@ -11,13 +11,30 @@ from urllib.parse import urlparse
 
 import httpx
 
+from Projeto.cache import MemoryTTLCache
+
 GOG_CATALOG_URL = "https://catalog.gog.com/v1/catalog"
 GOG_TIMEOUT_SECONDS = 8.0
 GOG_COVER_HOST = "images.gog-statics.com"
 GOG_STORE_HOST = "www.gog.com"
+GOG_METADATA_CACHE_MAX_ENTRIES = 256
 
 GogPriceStatus = Literal["paid", "free", "unavailable"]
 GogMatchStatus = Literal["matched", "not_found", "ambiguous"]
+
+
+@dataclass(frozen=True)
+class GogProductMetadata:
+    product_id: str
+    title: str
+    store_url: str
+    cover_url: str
+
+
+_METADATA_CACHE: MemoryTTLCache[
+    tuple[str, str, str, str],
+    GogProductMetadata,
+] = MemoryTTLCache(max_entries=GOG_METADATA_CACHE_MAX_ENTRIES)
 
 
 class GogServiceError(Exception):
@@ -199,6 +216,38 @@ def parse_catalog_results(payload: object, requested_title: str) -> GogMatchResu
     return GogMatchResult(status="not_found")
 
 
+def _cache_match_metadata(
+    cache_key: tuple[str, str, str, str],
+    result: GogMatchResult,
+) -> GogMatchResult:
+    offer = result.offer
+    if result.status != "matched" or offer is None:
+        return result
+
+    metadata = _METADATA_CACHE.get(cache_key)
+    if metadata is None or metadata.product_id != offer.product_id:
+        metadata = GogProductMetadata(
+            product_id=offer.product_id,
+            title=offer.title,
+            store_url=offer.store_url,
+            cover_url=offer.cover_url,
+        )
+        _METADATA_CACHE.set(cache_key, metadata)
+
+    # Keep metadata reusable while always carrying the offer price from this response.
+    return GogMatchResult(
+        status="matched",
+        offer=GogOffer(
+            product_id=metadata.product_id,
+            title=metadata.title,
+            store_url=metadata.store_url,
+            cover_url=metadata.cover_url,
+            status=offer.status,
+            final_price_minor=offer.final_price_minor,
+        ),
+    )
+
+
 async def _get_json(
     params: dict[str, str | int],
     transport: httpx.AsyncBaseTransport | None = None,
@@ -237,6 +286,7 @@ async def search_gog_offer(
     if not normalized_title:
         raise ValueError("O título do jogo não pode ser vazio.")
 
+    cache_key = (normalized_title.casefold(), "en-US", "BRL", "BR")
     params = {
         "limit": 50,
         "order": "desc:trending",
@@ -249,7 +299,7 @@ async def search_gog_offer(
     payload = await _get_json(params, transport=transport)
     result = parse_catalog_results(payload, normalized_title)
     if result.status == "matched":
-        return result
+        return _cache_match_metadata(cache_key, result)
 
     normalized_query = _normalize_query(normalized_title)
     if normalized_query == normalized_title:
@@ -274,7 +324,10 @@ async def search_gog_offer(
         if not isinstance(product_id, (str, int)) or isinstance(product_id, bool):
             raise GogServiceError("A GOG retornou um resultado inválido.")
         combined_products[str(product_id)] = product
-    return parse_catalog_results(
-        {"products": list(combined_products.values())},
-        normalized_title,
+    return _cache_match_metadata(
+        cache_key,
+        parse_catalog_results(
+            {"products": list(combined_products.values())},
+            normalized_title,
+        ),
     )

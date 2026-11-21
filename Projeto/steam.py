@@ -9,12 +9,20 @@ from urllib.parse import urlparse
 
 import httpx
 
+from Projeto.cache import MemoryTTLCache
+
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
 STEAM_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
 STEAM_TIMEOUT_SECONDS = 8.0
 MAX_SEARCH_LENGTH = 100
+STEAM_SEARCH_CACHE_MAX_ENTRIES = 256
 
 PriceStatus = Literal["paid", "free", "unavailable"]
+
+_SEARCH_CACHE: MemoryTTLCache[
+    tuple[str, str, str],
+    tuple[SteamGame, ...],
+] = MemoryTTLCache(max_entries=STEAM_SEARCH_CACHE_MAX_ENTRIES)
 
 
 class SteamServiceError(Exception):
@@ -234,12 +242,21 @@ async def search_steam_games(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> list[SteamGame]:
     normalized = validate_search_term(term)
+    cache_key = (normalized.casefold(), "BR", "brazilian")
+    if transport is None:
+        cached_games = _SEARCH_CACHE.get(cache_key)
+        if cached_games is not None:
+            return list(cached_games)
+
     payload = await _get_json(
         STEAM_SEARCH_URL,
         {"term": normalized, "cc": "BR", "l": "brazilian"},
         transport=transport,
     )
-    return parse_search_results(payload)
+    games = parse_search_results(payload)
+    if transport is None:
+        _SEARCH_CACHE.set(cache_key, tuple(games))
+    return games
 
 
 async def get_steam_game_price(

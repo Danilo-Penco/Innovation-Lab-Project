@@ -16,7 +16,7 @@ Para encontrar o menor preço de uma key de jogo, o usuário hoje precisa visita
 - Lojas/distribuidoras de keys de jogos que desejam ser incluídas na comparação.
 
 ## 5. Escopo
-A aplicação oferece cadastro e login por e-mail e senha para encaminhar usuários autenticados às áreas protegidas. A conta fica no banco SQLite próprio da aplicação Reflex; a senha é armazenada como hash com salt, nunca em texto puro. Os formulários em `/` e `/cadastro` são centralizados e usam espaçamento compacto para caber em telas comuns sem rolagem; em viewports baixos, a página continua rolável sem cortar controles. O cabeçalho apresenta “Entrar” sem sessão e “Sair” com sessão autenticada; a saída encerra a identidade da sessão e retorna à página de login, inclusive a partir da busca pública. A marca ComparaKeys no cabeçalho e no cadastro leva ao catálogo; no login, permanece sem link. O catálogo continua protegido e redireciona pessoas sem sessão para `/`.
+A aplicação oferece cadastro e login por Nome, e-mail e senha para encaminhar usuários autenticados às áreas protegidas. As contas são persistidas na tabela `user` do Xano pelos endpoints existentes `auth/signup` e `auth/login`; o Reflex mantém o `authToken` apenas no estado server-side da sessão, que foi verificado após recarga completa do navegador, e valida o acesso ao catálogo com `auth/me` a cada carregamento protegido. O token Xano não é armazenado em `localStorage`, `sessionStorage` ou URL. Não há contas locais SQLite nem migração de contas. Os formulários em `/` e `/cadastro` são centralizados e usam espaçamento compacto para caber em telas comuns sem rolagem; em viewports baixos, a página continua rolável sem cortar controles. O cabeçalho apresenta “Entrar” sem sessão e “Sair” com sessão autenticada; a saída limpa a sessão Reflex e retorna à página de login, inclusive a partir da busca pública. A marca ComparaKeys no cabeçalho e no cadastro leva ao catálogo; no login, permanece sem link. O catálogo continua protegido e redireciona pessoas sem sessão válida para `/`.
 A cada carregamento, o catálogo protegido sorteia oito jogos de uma lista fixa de pelo menos 12 exemplos com capas; um deles aparece em destaque e os demais em uma grade. Esses exemplos são ilustrativos e não representam popularidade, preços ou promoções atuais. As capas têm texto alternativo e exibem um fallback com o nome do jogo quando a imagem falha. Todos os cards, inclusive o destaque, abrem a comparação pelo App ID Steam do jogo. Após a grade, o catálogo mostra um breve texto institucional e um link para `/buscar`.
 A busca Steam e a comparação Steam/GOG ficam disponíveis publicamente, sem exigir login e sem persistir buscas ou preços. A pessoa pode iniciar a busca pelo campo “Comparar Preços” no catálogo; o termo abre `/buscar` preenchido e os resultados são carregados automaticamente. Na busca, os resultados da Steam são atualizados conforme a pessoa digita. Ao selecionar um jogo, a aplicação abre `/comparar?app_id=<id>`, uma rota dedicada que carrega os preços atuais, inclusive quando acessada diretamente. A GOG prioriza o título normalizado idêntico e, se não houver, aceita somente uma correspondência única por prefixo/contenção após ignorar qualificadores comuns de edição. Ausência, ambiguidade e preço não disponível em BRL têm mensagens próprias; nesses casos, a oferta Steam continua visível. A página inicial `/` é o login, e `/cadastro` apresenta a criação de conta.
 Fora do escopo desta etapa: Epic Games Store, compra dentro do site, conversão cambial, persistência/histórico de preços, recuperação de senha, login externo e papéis/permissões administrativas.
@@ -38,16 +38,16 @@ Fora do escopo inicial: compra direta dentro do site (o usuário é redirecionad
 
 ## 8. Arquitetura tecnológica
 - Backend: Xano (XanoScript) para lógica de negócio das funcionalidades integradas ao Xano.
-- Aplicação web: Reflex (Python); autenticação desta etapa, persistência de contas em SQLite e busca pública Steam são executadas no servidor Reflex.
+- Aplicação web: Reflex (Python); interface, estado de sessão, validação do token do catálogo por `auth/me` e busca pública Steam são executados no servidor Reflex. A autenticação e a persistência de usuários são fornecidas pelo Xano.
 - Integração externa: APIs públicas da Steam e do catálogo GOG para busca e preços regionais em BRL.
-- As buscas e os preços Steam/GOG não são gravados no banco Reflex nem no Xano e não mantêm cache ou histórico persistente.
+- Resultados de busca Steam e metadados de identificação GOG podem permanecer apenas em cache limitado na memória do processo, com TTL máximo de 5 minutos. Preços nunca são armazenados no cache e cada comparação consulta valores atuais das lojas; buscas, metadados e preços não são gravados no banco Reflex, no Xano ou em arquivos.
 
 ## 9. Princípios de desenvolvimento
 - Priorizar a busca/comparação de preços como núcleo do sistema antes de recursos secundários.
 - Desenvolvimento incremental, guiado pelo OpenSpec.
 
 ## 10. Segurança e integridade
-- Funcionalidades protegidas exigem login validado no backend Reflex; a busca e comparação de preços Steam/GOG são públicas.
+- Funcionalidades protegidas exigem que o backend Reflex valide o `authToken` da sessão usando `auth/me`; falha de conexão não libera o catálogo. A busca e comparação de preços Steam/GOG são públicas.
 - Regras de autorização devem ser aplicadas no backend responsável pela funcionalidade (Reflex ou Xano), nunca só no frontend.
 
 ## 11. Estratégia de desenvolvimento

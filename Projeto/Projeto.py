@@ -1,12 +1,6 @@
 import reflex as rx
 
-from Projeto.auth import (
-    AuthInputError,
-    DuplicateEmailError,
-    account_exists,
-    register_account,
-    verify_credentials,
-)
+from Projeto import xano
 from Projeto.catalog import (
     CATALOG_GAMES,
     CatalogGame,
@@ -31,6 +25,8 @@ from Projeto.steam import (
     search_steam_games,
     validate_search_term,
 )
+
+SESSION_EXPIRED_MESSAGE = "Sua sessão expirou. Entre novamente para continuar."
 
 
 class SearchState(rx.State):
@@ -254,12 +250,14 @@ class SearchState(rx.State):
 
 
 class AuthState(rx.State):
+    name: str = ""
     email: str = ""
     password: str = ""
+    password_visible: bool = False
     auth_error: str = ""
     is_splash_visible: bool = False
     is_submitting: bool = False
-    _user_id: int | None = None
+    _auth_token: str | None = None
     _catalog_authorized: bool = False
 
     @rx.var
@@ -268,7 +266,12 @@ class AuthState(rx.State):
 
     @rx.var
     def is_authenticated(self) -> bool:
-        return isinstance(self._user_id, int) and not isinstance(self._user_id, bool)
+        return isinstance(self._auth_token, str) and bool(self._auth_token)
+
+    @rx.event
+    def set_name(self, value: str):
+        self.name = value
+        self.auth_error = ""
 
     @rx.event
     def set_email(self, value: str):
@@ -281,37 +284,66 @@ class AuthState(rx.State):
         self.auth_error = ""
 
     @rx.event
+    def toggle_password_visibility(self):
+        self.password_visible = not self.password_visible
+
+    @rx.event
     def open_register(self):
         self.auth_error = ""
         self.password = ""
+        self.password_visible = False
+        self.name = ""
         return rx.redirect("/cadastro")
 
     @rx.event
     def open_login(self):
         self.auth_error = ""
         self.password = ""
+        self.password_visible = False
+        self.name = ""
         return rx.redirect("/")
 
     @rx.event
     def prepare_form(self):
-        self.auth_error = ""
+        query_parameters = self.router.url.query_parameters
+        self.auth_error = (
+            SESSION_EXPIRED_MESSAGE
+            if query_parameters.get("session") == "expired"
+            else ""
+        )
         self.password = ""
+        self.password_visible = False
+        self.name = ""
+        self.is_submitting = False
+
+    def _api_error_message(self, error: xano.XanoApiError) -> str:
+        message = error.message
+        if self.password:
+            message = message.replace(self.password, "[redigida]")
+        details = f"HTTP {error.status_code}, {error.code}"
+        if error.payload_param:
+            details = f"{details}, campo {error.payload_param}"
+        return f"{message} ({details})"
 
     @rx.event
     def logout(self):
-        self._user_id = None
+        self._auth_token = None
         self._catalog_authorized = False
         self.is_splash_visible = False
         self.is_submitting = False
+        self.name = ""
         self.email = ""
         self.password = ""
+        self.password_visible = False
         self.auth_error = ""
         return rx.redirect("/")
 
-    def _start_authenticated_transition(self, user_id: int):
-        self._user_id = user_id
+    def _start_authenticated_transition(self, session: xano.AuthSession):
+        self._auth_token = session.auth_token
         self._catalog_authorized = False
+        self.name = ""
         self.password = ""
+        self.password_visible = False
         self.auth_error = ""
         self.is_submitting = False
         self.is_splash_visible = True
@@ -320,43 +352,90 @@ class AuthState(rx.State):
         )
 
     @rx.event
-    def login(self):
+    async def login(self):
         self.auth_error = ""
         self.is_submitting = True
-        self._user_id = None
-        user_id = verify_credentials(self.email, self.password)
-        if user_id is None:
+        self.password_visible = False
+        self._auth_token = None
+        self._catalog_authorized = False
+        try:
+            session = await xano.login(self.email, self.password)
+        except xano.InvalidCredentialsError:
             self.password = ""
+            self.password_visible = False
             self.is_submitting = False
             self.auth_error = "E-mail ou senha inválidos."
             return
-        return self._start_authenticated_transition(user_id)
-
-    @rx.event
-    def register(self):
-        self.auth_error = ""
-        self.is_submitting = True
-        self._user_id = None
-        try:
-            user_id = register_account(self.email, self.password)
-        except (AuthInputError, DuplicateEmailError) as error:
+        except xano.AuthInputError as error:
             self.password = ""
+            self.password_visible = False
             self.is_submitting = False
             self.auth_error = str(error)
             return
-        return self._start_authenticated_transition(user_id)
+        except xano.XanoApiError as error:
+            self.auth_error = self._api_error_message(error)
+            self.password = ""
+            self.password_visible = False
+            self.is_submitting = False
+            return
+        except xano.XanoUnavailableError:
+            self.password = ""
+            self.password_visible = False
+            self.is_submitting = False
+            self.auth_error = xano.AUTH_SERVICE_UNAVAILABLE_MESSAGE
+            return
+        return self._start_authenticated_transition(session)
 
     @rx.event
-    def guard_catalog(self):
-        user_id = self._user_id
-        if (
-            not isinstance(user_id, int)
-            or isinstance(user_id, bool)
-            or not account_exists(user_id)
-        ):
-            self._user_id = None
-            self._catalog_authorized = False
+    async def register(self):
+        self.auth_error = ""
+        self.is_submitting = True
+        self.password_visible = False
+        self._auth_token = None
+        self._catalog_authorized = False
+        try:
+            session = await xano.signup(self.name, self.email, self.password)
+        except (xano.AuthInputError, xano.DuplicateEmailError) as error:
+            self.password = ""
+            self.password_visible = False
+            self.is_submitting = False
+            self.auth_error = str(error)
+            return
+        except xano.XanoApiError as error:
+            self.auth_error = self._api_error_message(error)
+            self.password = ""
+            self.password_visible = False
+            self.is_submitting = False
+            return
+        except xano.XanoUnavailableError:
+            self.password = ""
+            self.password_visible = False
+            self.is_submitting = False
+            self.auth_error = xano.AUTH_SERVICE_UNAVAILABLE_MESSAGE
+            return
+        return self._start_authenticated_transition(session)
+
+    @rx.event
+    async def guard_catalog(self):
+        auth_token = self._auth_token
+        self._catalog_authorized = False
+        self.auth_error = ""
+        if not isinstance(auth_token, str) or not auth_token:
+            self._auth_token = None
             return rx.redirect("/")
+
+        try:
+            user = await xano.me(auth_token)
+        except xano.InvalidTokenError:
+            self._auth_token = None
+            return rx.redirect("/?session=expired")
+        except xano.XanoApiError as error:
+            self.auth_error = self._api_error_message(error)
+            return
+        except xano.XanoUnavailableError:
+            self.auth_error = xano.AUTH_SERVICE_UNAVAILABLE_MESSAGE
+            return
+
         self._catalog_authorized = True
         self.is_splash_visible = False
 
@@ -410,11 +489,47 @@ GLOBAL_CSS = """
         padding: 1rem !important;
     }
 }
+.site-navbar {
+    gap: 0.75rem;
+}
+.catalog-search input {
+    flex: 1 1 0;
+    min-width: 0;
+}
+.catalog-search button {
+    flex: 0 0 auto;
+}
+:where(a, button, input):focus-visible {
+    outline: 3px solid #c4b5fd;
+    outline-offset: 2px;
+}
 .price-comparison-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
     gap: 1rem;
     width: 100%;
+}
+@media (max-width: 600px) {
+    .site-navbar {
+        padding-inline: 0.75rem !important;
+    }
+    .catalog-search {
+        align-items: stretch;
+        flex-direction: column;
+    }
+    .catalog-search > * {
+        width: 100% !important;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+    }
 }
 """
 
@@ -457,9 +572,10 @@ def navbar() -> rx.Component:
             ),
         ),
         width="100%",
-        padding="1rem 2rem",
+        padding="1rem clamp(0.75rem, 4vw, 2rem)",
         align="center",
         border_bottom="1px solid var(--gray-5)",
+        class_name="site-navbar",
     )
 
 
@@ -495,6 +611,7 @@ def price_comparison() -> rx.Component:
                 rx.spinner(),
                 rx.text("Consultando preços atuais na Steam e na GOG..."),
                 align="center",
+                role="status",
             ),
             rx.fragment(),
         ),
@@ -522,14 +639,22 @@ def price_comparison() -> rx.Component:
                     ),
                     rx.cond(
                         SearchState.price_status == "paid",
-                        rx.heading(
-                            SearchState.formatted_price,
-                            size="7",
-                            color=rx.cond(
-                                SearchState.steam_is_cheapest,
-                                "#4ade80",
-                                "white",
+                        rx.vstack(
+                            rx.heading(
+                                SearchState.formatted_price,
+                                size="7",
+                                color=rx.cond(
+                                    SearchState.steam_is_cheapest,
+                                    "#4ade80",
+                                    "white",
+                                ),
                             ),
+                            rx.cond(
+                                SearchState.steam_is_cheapest,
+                                rx.text("Menor preço", color="#4ade80", size="2"),
+                                rx.fragment(),
+                            ),
+                            spacing="1",
                         ),
                         rx.fragment(),
                     ),
@@ -545,6 +670,12 @@ def price_comparison() -> rx.Component:
                                     "white",
                                 ),
                             ),
+                            rx.cond(
+                                SearchState.steam_is_cheapest,
+                                rx.text("Menor preço", color="#4ade80", size="2"),
+                                rx.fragment(),
+                            ),
+                            align="center",
                         ),
                         rx.fragment(),
                     ),
@@ -591,14 +722,22 @@ def price_comparison() -> rx.Component:
                         ),
                         rx.cond(
                             SearchState.gog_status == "paid",
-                            rx.heading(
-                                SearchState.formatted_gog_price,
-                                size="7",
-                                color=rx.cond(
-                                    SearchState.gog_is_cheapest,
-                                    "#4ade80",
-                                    "white",
+                            rx.vstack(
+                                rx.heading(
+                                    SearchState.formatted_gog_price,
+                                    size="7",
+                                    color=rx.cond(
+                                        SearchState.gog_is_cheapest,
+                                        "#4ade80",
+                                        "white",
+                                    ),
                                 ),
+                                rx.cond(
+                                    SearchState.gog_is_cheapest,
+                                    rx.text("Menor preço", color="#4ade80", size="2"),
+                                    rx.fragment(),
+                                ),
+                                spacing="1",
                             ),
                             rx.fragment(),
                         ),
@@ -614,6 +753,12 @@ def price_comparison() -> rx.Component:
                                         "white",
                                     ),
                                 ),
+                                rx.cond(
+                                    SearchState.gog_is_cheapest,
+                                    rx.text("Menor preço", color="#4ade80", size="2"),
+                                    rx.fragment(),
+                                ),
+                                align="center",
                             ),
                             rx.fragment(),
                         ),
@@ -732,6 +877,7 @@ def steam_search() -> rx.Component:
                             placeholder="Digite o nome de um jogo",
                             aria_label="Nome do jogo",
                             max_length=100,
+                            debounce_timeout=300,
                             size="3",
                             width="100%",
                         ),
@@ -741,17 +887,26 @@ def steam_search() -> rx.Component:
                                 rx.spinner(),
                                 rx.text("Buscando jogos na Steam..."),
                                 align="center",
+                                role="status",
                             ),
                             rx.fragment(),
                         ),
                         rx.cond(
                             SearchState.search_error != "",
-                            rx.text(SearchState.search_error, color="tomato"),
+                            rx.text(
+                                SearchState.search_error,
+                                color="tomato",
+                                role="alert",
+                            ),
                             rx.fragment(),
                         ),
                         rx.cond(
                             SearchState.no_results,
-                            rx.text("Nenhum jogo encontrado. Tente outro nome.", color="gray"),
+                            rx.text(
+                                "Nenhum jogo encontrado. Tente outro nome.",
+                                color="gray",
+                                role="status",
+                            ),
                             rx.fragment(),
                         ),
                         rx.cond(
@@ -851,7 +1006,11 @@ def splash_screen() -> rx.Component:
         rx.vstack(
             auth_brand(),
             rx.spinner(size="3", color="#c4b5fd"),
-            rx.text("Preparando seu catálogo...", color="#c4b5fd"),
+            rx.text(
+                "Preparando seu catálogo...",
+                color="#c4b5fd",
+                role="status",
+            ),
             align="center",
             spacing="5",
         ),
@@ -859,6 +1018,23 @@ def splash_screen() -> rx.Component:
         min_height="100vh",
         padding="1.5rem",
         background="radial-gradient(circle at center, #24133f 0%, #0b0910 58%, #050407 100%)",
+    )
+
+
+def password_visibility_toggle() -> rx.Component:
+    label = rx.cond(
+        AuthState.password_visible,
+        "Ocultar senha",
+        "Mostrar senha",
+    )
+    return rx.button(
+        label,
+        on_click=AuthState.toggle_password_visibility,
+        aria_label=label,
+        variant="ghost",
+        size="2",
+        color_scheme="violet",
+        align_self="flex-end",
     )
 
 
@@ -890,10 +1066,22 @@ def login_card() -> rx.Component:
                     on_change=AuthState.set_password,
                     placeholder="Sua senha",
                     aria_label="Senha",
-                    type="password",
+                    aria_describedby="login-password-rule",
+                    type=rx.cond(
+                        AuthState.password_visible,
+                        "text",
+                        "password",
+                    ),
                     max_length=128,
                     width="100%",
                     size="3",
+                ),
+                password_visibility_toggle(),
+                rx.text(
+                    "Mínimo de 8 caracteres e ao menos uma letra.",
+                    id="login-password-rule",
+                    color="#b8afc8",
+                    size="1",
                 ),
                 rx.button(
                     "Cadastrar-se",
@@ -947,11 +1135,22 @@ def register_card() -> rx.Component:
             auth_brand(clickable=True),
             rx.heading("Crie sua conta", size="6", color="white"),
             rx.text(
-                "Use seu e-mail e uma senha para se cadastrar.",
+                "Informe seu nome, e-mail e uma senha para se cadastrar.",
                 color="#b8afc8",
                 text_align="center",
             ),
             rx.vstack(
+                rx.text("Nome", color="#e9ddff", size="2", weight="medium"),
+                rx.input(
+                    value=AuthState.name,
+                    on_change=AuthState.set_name,
+                    placeholder="Seu nome",
+                    aria_label="Nome",
+                    type="text",
+                    required=True,
+                    width="100%",
+                    size="3",
+                ),
                 rx.text("E-mail", color="#e9ddff", size="2", weight="medium"),
                 rx.input(
                     value=AuthState.email,
@@ -967,13 +1166,25 @@ def register_card() -> rx.Component:
                 rx.input(
                     value=AuthState.password,
                     on_change=AuthState.set_password,
-                    placeholder="Mínimo de 8 caracteres",
+                    placeholder="Sua senha",
                     aria_label="Senha",
-                    type="password",
+                    aria_describedby="register-password-rule",
+                    type=rx.cond(
+                        AuthState.password_visible,
+                        "text",
+                        "password",
+                    ),
                     min_length=8,
                     max_length=128,
                     width="100%",
                     size="3",
+                ),
+                password_visibility_toggle(),
+                rx.text(
+                    "Mínimo de 8 caracteres e ao menos uma letra.",
+                    id="register-password-rule",
+                    color="#b8afc8",
+                    size="1",
                 ),
                 rx.button(
                     rx.cond(
@@ -1086,6 +1297,7 @@ def catalog_page() -> rx.Component:
                             ),
                             width="100%",
                             align="center",
+                            class_name="catalog-search",
                         ),
                         rx.cond(
                             CatalogState.search_error != "",
@@ -1166,11 +1378,40 @@ def catalog_page() -> rx.Component:
                 background="radial-gradient(circle at 50% 25%, #261442 0%, #0b0910 54%, #050407 100%)",
                 spacing="0",
             ),
-            rx.center(
-                rx.spinner(size="3", color="#c4b5fd"),
-                width="100%",
-                min_height="100vh",
-                background="#08060c",
+            rx.cond(
+                AuthState.auth_error != "",
+                rx.center(
+                    rx.vstack(
+                        rx.text(
+                            AuthState.auth_error,
+                            role="alert",
+                            color="#fca5a5",
+                            text_align="center",
+                        ),
+                        rx.button(
+                            "Tentar novamente",
+                            on_click=AuthState.guard_catalog,
+                            color_scheme="violet",
+                        ),
+                        rx.button(
+                            "Voltar para login",
+                            on_click=AuthState.logout,
+                            variant="outline",
+                        ),
+                        align="center",
+                        spacing="3",
+                    ),
+                    width="100%",
+                    min_height="100vh",
+                    padding="1.5rem",
+                    background="#08060c",
+                ),
+                rx.center(
+                    rx.spinner(size="3", color="#c4b5fd"),
+                    width="100%",
+                    min_height="100vh",
+                    background="#08060c",
+                ),
             ),
         ),
     )

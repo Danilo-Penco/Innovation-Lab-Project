@@ -1,8 +1,10 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
 from Projeto.steam import (
+    _SEARCH_CACHE,
     InvalidSearchTerm,
     SteamServiceError,
     SteamGame,
@@ -143,6 +145,9 @@ class SteamResponseParsingTests(unittest.TestCase):
 
 
 class SteamHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        _SEARCH_CACHE.clear()
+
     async def test_search_request_uses_brazil_and_parses_results(self) -> None:
         def respond(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.url.params["term"], "Portal")
@@ -188,6 +193,39 @@ class SteamHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(price.status, "paid")
         self.assertEqual(price.final_price_minor, 659)
 
+    async def test_repeated_price_requests_fetch_current_steam_values(self) -> None:
+        prices = iter((659, 559))
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                json={
+                    "620": {
+                        "success": True,
+                        "data": {
+                            "type": "game",
+                            "name": "Portal 2",
+                            "is_free": False,
+                            "price_overview": {
+                                "currency": "BRL",
+                                "final": next(prices),
+                            },
+                        },
+                    }
+                },
+                request=request,
+            )
+
+        transport = httpx.MockTransport(respond)
+        first = await get_steam_game_price(620, transport=transport)
+        second = await get_steam_game_price(620, transport=transport)
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(first.final_price_minor, 659)
+        self.assertEqual(second.final_price_minor, 559)
+
     async def test_non_success_http_status_is_recoverable_error(self) -> None:
         def respond(request: httpx.Request) -> httpx.Response:
             return httpx.Response(503, request=request)
@@ -217,6 +255,31 @@ class SteamHttpTests(unittest.IsolatedAsyncioTestCase):
                 "Portal",
                 transport=httpx.MockTransport(respond),
             )
+
+
+class SteamSearchCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        _SEARCH_CACHE.clear()
+
+    async def test_search_reuses_normalized_results_without_sharing_mutable_lists(self):
+        response = [SteamGame(app_id=620, name="Portal 2")]
+        with patch(
+            "Projeto.steam._get_json",
+            new=AsyncMock(
+                return_value={
+                    "items": [
+                        {"type": "app", "id": game.app_id, "name": game.name}
+                        for game in response
+                    ]
+                }
+            ),
+        ) as get_json:
+            results = await search_steam_games(" Portal ")
+            results.clear()
+            cached_results = await search_steam_games("portal")
+
+        get_json.assert_awaited_once()
+        self.assertEqual(cached_results, response)
 
 
 if __name__ == "__main__":
