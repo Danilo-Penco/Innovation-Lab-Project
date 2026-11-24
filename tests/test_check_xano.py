@@ -11,6 +11,9 @@ from scripts import check_xano
 TEST_EMAIL = "test-xano@example.invalid"
 TEST_PASSWORD = "test-only-password"
 TEST_TOKEN = "test-only-token"
+TEST_EMAIL_2 = "test-xano-2@example.invalid"
+TEST_PASSWORD_2 = "test-only-password-2"
+TEST_TOKEN_2 = "test-only-token-2"
 
 
 class FakeClient:
@@ -22,12 +25,21 @@ class FakeClient:
         network_error=None,
         signup_error_field="name",
         unauthenticated_me_status=401,
+        unauthenticated_history_statuses=None,
+        history_deduplicates=True,
+        history_leaks=False,
     ):
         self.legacy_statuses = legacy_statuses or {}
         self.login_status = login_status
         self.network_error = network_error
         self.signup_error_field = signup_error_field
         self.unauthenticated_me_status = unauthenticated_me_status
+        self.unauthenticated_history_statuses = unauthenticated_history_statuses or {}
+        self.history_deduplicates = history_deduplicates
+        self.history_leaks = history_leaks
+        self.histories = {17: [], 18: []}
+        self.next_history_id = 500
+        self.history_clock = 1762000000000
         self.requests = []
 
     def __enter__(self):
@@ -42,6 +54,12 @@ class FakeClient:
         if self.network_error and path == "/auth/login":
             raise self.network_error
         if path == "/auth/login":
+            if json and json.get("email") == TEST_EMAIL_2:
+                return httpx.Response(
+                    200,
+                    json={"authToken": TEST_TOKEN_2, "user_id": 18},
+                    request=httpx.Request(method, url),
+                )
             return httpx.Response(
                 self.login_status,
                 json={"authToken": TEST_TOKEN, "user_id": 17},
@@ -53,13 +71,15 @@ class FakeClient:
                 request=httpx.Request(method, url),
             )
         if path == "/auth/me":
+            auth_token = headers.get("Authorization", "").removeprefix("Bearer ")
+            user_id = 18 if auth_token == TEST_TOKEN_2 else 17
             return httpx.Response(
                 200,
                 json={
-                    "id": 17,
+                    "id": user_id,
                     "created_at": 1762000000000,
                     "name": "Test",
-                    "email": TEST_EMAIL,
+                    "email": TEST_EMAIL_2 if user_id == 18 else TEST_EMAIL,
                     "role": "user",
                 },
                 request=httpx.Request(method, url),
@@ -73,6 +93,63 @@ class FakeClient:
                 json=body,
                 request=httpx.Request(method, url),
             )
+        if path == "/history":
+            if not headers:
+                return httpx.Response(
+                    self.unauthenticated_history_statuses.get(method, 401),
+                    request=httpx.Request(method, url),
+                )
+            auth_token = headers.get("Authorization", "").removeprefix("Bearer ")
+            user_id = 17 if auth_token == TEST_TOKEN else 18 if auth_token == TEST_TOKEN_2 else None
+            if user_id is None:
+                return httpx.Response(401, request=httpx.Request(method, url))
+            if method == "GET":
+                items = (
+                    [item for values in self.histories.values() for item in values]
+                    if self.history_leaks
+                    else self.histories[user_id]
+                )
+                return httpx.Response(
+                    200,
+                    json=sorted(items, key=lambda item: (item["created_at"], item["id"]), reverse=True),
+                    request=httpx.Request(method, url),
+                )
+            if method == "POST":
+                payload = json or {}
+                records = self.histories[user_id]
+                if (
+                    self.history_deduplicates
+                    and records
+                    and records[-1]["steam_app_id"] == payload.get("steam_app_id")
+                ):
+                    record = records[-1]
+                    record["term"] = payload["term"]
+                    record["game_name"] = payload["game_name"]
+                else:
+                    self.next_history_id += 1
+                    record = {
+                        "id": self.next_history_id,
+                        "term": payload["term"],
+                        "steam_app_id": payload["steam_app_id"],
+                        "game_name": payload["game_name"],
+                        "created_at": self.history_clock,
+                    }
+                    records.append(record)
+                self.history_clock += 1
+                record["created_at"] = self.history_clock
+                return httpx.Response(
+                    200,
+                    json={"id": record["id"]},
+                    request=httpx.Request(method, url),
+                )
+            if method == "DELETE":
+                deleted = len(self.histories[user_id])
+                self.histories[user_id].clear()
+                return httpx.Response(
+                    200,
+                    json={"deleted": deleted},
+                    request=httpx.Request(method, url),
+                )
         status = self.legacy_statuses.get((method, path), 404)
         return httpx.Response(status, request=httpx.Request(method, url))
 
@@ -85,6 +162,8 @@ class XanoCheckerTests(unittest.TestCase):
                 "XANO_API_URL": "https://xano.test/api:auth",
                 "XANO_TEST_EMAIL": TEST_EMAIL,
                 "XANO_TEST_PASSWORD": TEST_PASSWORD,
+                "XANO_TEST_EMAIL_2": TEST_EMAIL_2,
+                "XANO_TEST_PASSWORD_2": TEST_PASSWORD_2,
             },
         )
         self.environment.start()
@@ -110,6 +189,9 @@ class XanoCheckerTests(unittest.TestCase):
         self.assertNotIn(TEST_EMAIL, output)
         self.assertNotIn(TEST_PASSWORD, output)
         self.assertNotIn(TEST_TOKEN, output)
+        self.assertNotIn(TEST_EMAIL_2, output)
+        self.assertNotIn(TEST_PASSWORD_2, output)
+        self.assertNotIn(TEST_TOKEN_2, output)
 
         legacy_requests = [
             request
@@ -135,6 +217,98 @@ class XanoCheckerTests(unittest.TestCase):
             authenticated_me[3],
             {"Authorization": f"Bearer {TEST_TOKEN}"},
         )
+        history_requests = [request for request in client.requests if request[1] == "/history"]
+        self.assertTrue(history_requests)
+        unauthenticated_history_requests = [
+            request for request in history_requests if request[3] is None
+        ]
+        self.assertEqual(
+            {request[0] for request in unauthenticated_history_requests},
+            {"GET", "POST", "DELETE"},
+        )
+        authenticated_history_requests = [
+            request for request in history_requests if request[3] is not None
+        ]
+        self.assertTrue(
+            all(
+                request[3]
+                in (
+                    {"Authorization": f"Bearer {TEST_TOKEN}"},
+                    {"Authorization": f"Bearer {TEST_TOKEN_2}"},
+                )
+                for request in authenticated_history_requests
+            )
+        )
+        self.assertTrue(
+            all(
+                set(request[2]) == {"term", "steam_app_id", "game_name"}
+                for request in history_requests
+                if request[0] == "POST" and request[3] is not None
+            )
+        )
+        self.assertTrue(
+            any(
+                request[0] == "GET"
+                and request[3] == {"Authorization": f"Bearer {TEST_TOKEN}"}
+                for request in history_requests
+            )
+        )
+        self.assertTrue(
+            any(
+                request[0] == "GET"
+                and request[3] == {"Authorization": f"Bearer {TEST_TOKEN_2}"}
+                for request in history_requests
+            )
+        )
+        self.assertTrue(all(not request[2] or "user_id" not in request[2] for request in history_requests))
+        self.assertEqual(client.histories, {17: [], 18: []})
+        for method in ("POST", "GET", "DELETE"):
+            self.assertIn(f"PASS {method} /history sem token: HTTP 401", output)
+
+    def test_nonempty_test_account_is_skipped_without_mutating_history(self):
+        client = FakeClient()
+        client.histories[17].append(
+            {
+                "id": 9,
+                "term": "Existing",
+                "steam_app_id": 10,
+                "game_name": "Existing",
+                "created_at": 1762000000000,
+            }
+        )
+
+        result, output = self.run_checker(client)
+
+        self.assertEqual(result, 2)
+        self.assertIn("SKIP GET /history conta 1 pré-condição", output)
+        self.assertFalse(any(request[1] == "/history" and request[0] in {"POST", "DELETE"} for request in client.requests))
+        self.assertEqual(len(client.histories[17]), 1)
+
+    def test_checker_fails_when_history_is_not_isolated(self):
+        client = FakeClient(history_leaks=True)
+
+        result, output = self.run_checker(client)
+
+        self.assertEqual(result, 1)
+        self.assertIn("FAIL GET /history isolamento entre contas", output)
+        self.assertEqual(client.histories, {17: [], 18: []})
+
+    def test_checker_fails_when_consecutive_history_is_not_deduplicated(self):
+        client = FakeClient(history_deduplicates=False)
+
+        result, output = self.run_checker(client)
+
+        self.assertEqual(result, 1)
+        self.assertIn("FAIL POST /history deduplicação", output)
+        self.assertEqual(client.histories, {17: [], 18: []})
+
+    def test_checker_fails_when_unauthenticated_history_delete_is_not_401(self):
+        client = FakeClient(unauthenticated_history_statuses={"DELETE": 200})
+
+        result, output = self.run_checker(client)
+
+        self.assertEqual(result, 1)
+        self.assertIn("FAIL DELETE /history sem token", output)
 
     def test_legacy_route_401_is_failure_not_absence(self):
         client = FakeClient(

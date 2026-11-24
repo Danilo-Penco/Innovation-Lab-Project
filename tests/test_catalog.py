@@ -72,6 +72,29 @@ class CatalogTests(unittest.TestCase):
         )
         self.assertEqual(state.featured_app_id, next_featured.app_id)
 
+    def test_catalog_search_validates_term_and_uses_public_route(self) -> None:
+        empty_state = type(
+            "LandingStateStub",
+            (),
+            {"search_term": "  ", "search_error": ""},
+        )()
+        self.assertIsNone(CatalogState.search.fn(empty_state))
+        self.assertTrue(empty_state.search_error)
+
+        state = type(
+            "LandingStateStub",
+            (),
+            {"search_term": "Portal 2", "search_error": ""},
+        )()
+        with patch(
+            "Projeto.Projeto.build_steam_search_url",
+            return_value="/buscar?term=Portal+2",
+        ) as make_url:
+            redirect = CatalogState.search.fn(state)
+
+        make_url.assert_called_once_with("Portal 2")
+        self.assertIn("/buscar?term=Portal+2", repr(redirect))
+
     def test_search_url_encodes_and_preserves_the_term(self) -> None:
         term = "Portal 2 & Friends"
         url = build_steam_search_url(term)
@@ -115,6 +138,8 @@ class CatalogTests(unittest.TestCase):
         brand_link = repr(navbar().children[0])
 
         self.assertIn("/catalogo", brand_link)
+        self.assertIn("/", brand_link)
+        self.assertIn("/entrar", repr(navbar()))
         for page_factory in (catalog_page, steam_search, price_comparison_page):
             with self.subTest(page=page_factory.__name__):
                 self.assertIn("/catalogo", repr(page_factory()))
@@ -134,6 +159,17 @@ class CatalogTests(unittest.TestCase):
         self.assertIn('role:\\"alert\\"', search_page)
         self.assertIn('role:\\"status\\"', comparison)
         self.assertIn("Menor pre\\\\u00e7o", comparison)
+        self.assertIn("Outras lojas", comparison)
+        self.assertIn("Ver oferta", comparison)
+        self.assertIn("Logotipo da loja", comparison)
+        self.assertIn("rate_label", comparison)
+        self.assertIn("timestamp_label", comparison)
+        self.assertIn("Tentar novamente na Steam", comparison)
+        self.assertIn("Tentar novamente na GOG", comparison)
+        self.assertIn("Tentar novamente na CheapShark", comparison)
+        heading_position = comparison.index("Outras lojas")
+        notice_position = comparison.index("cheapshark_currency_notice")
+        self.assertLess(heading_position, notice_position)
 
     def test_search_url_rejects_blank_and_oversized_terms(self) -> None:
         for term in ("  \t", "x" * 101):

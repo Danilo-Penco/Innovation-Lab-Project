@@ -1,6 +1,8 @@
 # ComparaKeys
 
-Aplicação Reflex para comparar preços atuais de jogos na Steam e na GOG. A autenticação usa os endpoints Xano descritos no [contrato da API](docs/xano-setup.md); buscas e preços não são persistidos.
+Aplicação Reflex para comparar preços atuais de jogos na Steam e na GOG e consultar até cinco ofertas adicionais de lojas via CheapShark. A comparação identifica cada loja pelo nome e logotipo, destaca o menor preço comparável e informa a origem temporal do valor. Steam e GOG permanecem em BRL regional; ofertas CheapShark em USD exibem o valor original e, quando há cotação Frankfurter, o equivalente aproximado em BRL, a taxa exata e a data da cotação. Sem cotação, o preço permanece em US$. A rota pública `/` apresenta o projeto e oferece “Entrar” e “Cadastrar” a visitantes; o login fica em `/entrar` e o cadastro em `/cadastro`. A autenticação usa os endpoints Xano descritos no [contrato da API](docs/xano-setup.md); preços e cotações não são persistidos.
+
+Steam e GOG não fornecem um horário específico de atualização do preço nos endpoints públicos consultados; nesses casos, a comparação mostra “Consultado pelo ComparaKeys” no fuso `America/Sao_Paulo`. A CheapShark fornece `lastChange` por oferta, e esse instante é apresentado como atualização informada pela fonte. A leitura do cache de ofertas de cinco minutos preserva o horário original da consulta. As integrações têm timeout de 10 segundos, no máximo uma repetição automática somente para erro de rede/timeout e tratamento de HTTP 429/`Retry-After`; cada falha mantém os resultados válidos das demais lojas e pode ser repetida explicitamente.
 
 ## Ambiente local
 

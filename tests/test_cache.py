@@ -41,6 +41,21 @@ class MemoryTTLCacheTests(unittest.TestCase):
                 ttl_seconds=MAX_TTL_SECONDS + 1,
             )
 
+    def test_ttl_can_be_explicitly_extended_for_exchange_rates(self) -> None:
+        now = [0.0]
+        cache: MemoryTTLCache[str, str] = MemoryTTLCache(
+            max_entries=1,
+            ttl_seconds=3600,
+            max_ttl_seconds=3600,
+            clock=lambda: now[0],
+        )
+        cache.set("rate", "5.0")
+
+        now[0] = 3599
+        self.assertEqual(cache.get("rate"), "5.0")
+        now[0] = 3600
+        self.assertIsNone(cache.get("rate"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -16,6 +17,8 @@ from Projeto.steam import (
     search_steam_games,
     validate_search_term,
 )
+from Projeto import external_api
+from Projeto.price_metadata import STEAM_LOGO_URL
 
 
 class SearchValidationTests(unittest.TestCase):
@@ -147,6 +150,10 @@ class SteamResponseParsingTests(unittest.TestCase):
 class SteamHttpTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         _SEARCH_CACHE.clear()
+        external_api._RATE_LIMIT_UNTIL.clear()
+
+    async def asyncTearDown(self) -> None:
+        external_api._RATE_LIMIT_UNTIL.clear()
 
     async def test_search_request_uses_brazil_and_parses_results(self) -> None:
         def respond(request: httpx.Request) -> httpx.Response:
@@ -192,6 +199,31 @@ class SteamHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(price.status, "paid")
         self.assertEqual(price.final_price_minor, 659)
+        self.assertEqual(price.source_currency, "BRL")
+        self.assertEqual(price.original_price_minor, 659)
+        self.assertEqual(price.price_brl_minor, 659)
+        self.assertEqual(price.store_logo_url, STEAM_LOGO_URL)
+        self.assertIsNone(price.source_updated_at)
+        self.assertIsNotNone(price.fetched_at)
+
+    async def test_rate_limit_is_not_retried_and_has_a_steam_message(self) -> None:
+        calls = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "30"},
+                request=request,
+            )
+
+        transport = httpx.MockTransport(respond)
+        for _ in range(2):
+            with self.assertRaisesRegex(SteamServiceError, "limite temporário"):
+                await get_steam_game_price(620, transport=transport)
+
+        self.assertEqual(calls, 1)
 
     async def test_repeated_price_requests_fetch_current_steam_values(self) -> None:
         prices = iter((659, 559))

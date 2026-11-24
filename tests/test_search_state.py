@@ -3,6 +3,12 @@ import importlib
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from Projeto.cheapshark import (
+    CHEAPSHARK_NO_OFFERS_MESSAGE,
+    CHEAPSHARK_USD_FALLBACK_NOTICE,
+    CheapSharkOffer,
+    CheapSharkServiceError,
+)
 from Projeto.gog import GogMatchResult, GogOffer, GogServiceError
 from Projeto.steam import SteamGame, SteamPrice
 
@@ -17,6 +23,20 @@ class SearchStateComparisonTests(unittest.IsolatedAsyncioTestCase):
             SteamGame(app_id=620, name="Portal 2"),
             SteamGame(app_id=440, name="Team Fortress 2"),
         ]
+        cheapshark_patch = patch.object(
+            app_module,
+            "search_cheapshark_offers",
+            new=AsyncMock(return_value=[]),
+        )
+        cheapshark_patch.start()
+        self.addCleanup(cheapshark_patch.stop)
+        gog_patch = patch.object(
+            app_module,
+            "search_gog_offer",
+            new=AsyncMock(return_value=GogMatchResult(status="not_found")),
+        )
+        gog_patch.start()
+        self.addCleanup(gog_patch.stop)
         return state
 
     async def test_search_term_automatically_loads_results(self) -> None:
@@ -145,6 +165,173 @@ class SearchStateComparisonTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state.gog_is_cheapest)
         self.assertFalse(state.steam_is_cheapest)
 
+    async def test_cheapshark_and_gog_ties_are_all_marked_as_lowest(self) -> None:
+        state = self.make_state()
+        cheapshark_offers = [
+            CheapSharkOffer(
+                store_name="DreamGame",
+                price_label="≈ R$ 4,99",
+                deal_url="https://www.cheapshark.com/redirect?dealID=deal",
+                price_brl_minor=499,
+                is_approximate=True,
+            )
+        ]
+        with (
+            patch.object(
+                app_module,
+                "get_steam_game_price",
+                new=AsyncMock(
+                    return_value=SteamPrice(
+                        app_id=620,
+                        name="Portal 2",
+                        status="paid",
+                        final_price_minor=659,
+                    )
+                ),
+            ),
+            patch.object(
+                app_module,
+                "search_gog_offer",
+                new=AsyncMock(
+                    return_value=GogMatchResult(
+                        status="matched",
+                        offer=GogOffer(
+                            product_id="portal2",
+                            title="Portal 2",
+                            store_url="https://www.gog.com/en/game/portal_2",
+                            cover_url="https://images.gog-statics.com/portal2.png",
+                            status="paid",
+                            final_price_minor=499,
+                        ),
+                    )
+                ),
+            ),
+            patch.object(
+                app_module,
+                "search_cheapshark_offers",
+                new=AsyncMock(return_value=cheapshark_offers),
+            ),
+        ):
+            await app_module.SearchState._load_comparison(state, 620)
+
+        self.assertTrue(state.gog_is_cheapest)
+        self.assertFalse(state.steam_is_cheapest)
+        self.assertTrue(state.cheapshark_offers[0].is_cheapest)
+        self.assertEqual(
+            state.cheapshark_currency_notice,
+            "Preços internacionais em dólar, convertidos pela cotação do dia. "
+            "Steam e GOG mostram o preço regional em reais, então a "
+            "comparação é aproximada.",
+        )
+
+    async def test_cheapshark_failure_keeps_steam_and_gog_results(self) -> None:
+        state = self.make_state()
+        with (
+            patch.object(
+                app_module,
+                "get_steam_game_price",
+                new=AsyncMock(
+                    return_value=SteamPrice(
+                        app_id=620,
+                        name="Portal 2",
+                        status="paid",
+                        final_price_minor=659,
+                    )
+                ),
+            ),
+            patch.object(
+                app_module,
+                "search_gog_offer",
+                new=AsyncMock(
+                    return_value=GogMatchResult(
+                        status="matched",
+                        offer=GogOffer(
+                            product_id="portal2",
+                            title="Portal 2",
+                            store_url="https://www.gog.com/en/game/portal_2",
+                            cover_url="https://images.gog-statics.com/portal2.png",
+                            status="paid",
+                            final_price_minor=499,
+                        ),
+                    )
+                ),
+            ),
+            patch.object(
+                app_module,
+                "search_cheapshark_offers",
+                new=AsyncMock(
+                    side_effect=CheapSharkServiceError(
+                        "A CheapShark demorou demais para responder."
+                    )
+                ),
+            ),
+        ):
+            await app_module.SearchState._load_comparison(state, 620)
+
+        self.assertEqual(state.price_cents, 659)
+        self.assertEqual(state.gog_price_cents, 499)
+        self.assertIn("CheapShark demorou", state.cheapshark_error)
+        self.assertIn("Steam e GOG continuam disponíveis", state.cheapshark_error)
+        self.assertFalse(state.is_loading_cheapshark)
+
+    async def test_empty_cheapshark_result_has_its_own_message(self) -> None:
+        state = self.make_state()
+        with patch.object(
+            app_module,
+            "get_steam_game_price",
+            new=AsyncMock(
+                return_value=SteamPrice(
+                    app_id=620,
+                    name="Portal 2",
+                    status="paid",
+                    final_price_minor=659,
+                )
+            ),
+        ):
+            await app_module.SearchState._load_comparison(state, 620)
+
+        self.assertEqual(
+            state.cheapshark_error,
+            CHEAPSHARK_NO_OFFERS_MESSAGE,
+        )
+        self.assertEqual(state.price_cents, 659)
+
+    async def test_unconverted_usd_offer_shows_fallback_notice(self) -> None:
+        state = self.make_state()
+        raw_usd_offer = CheapSharkOffer(
+            store_name="DreamGame",
+            price_label="US$ 1,00",
+            deal_url="https://www.cheapshark.com/redirect?dealID=deal",
+            price_brl_minor=None,
+            is_approximate=False,
+        )
+        with (
+            patch.object(
+                app_module,
+                "get_steam_game_price",
+                new=AsyncMock(
+                    return_value=SteamPrice(
+                        app_id=620,
+                        name="Portal 2",
+                        status="paid",
+                        final_price_minor=659,
+                    )
+                ),
+            ),
+            patch.object(
+                app_module,
+                "search_cheapshark_offers",
+                new=AsyncMock(return_value=[raw_usd_offer]),
+            ),
+        ):
+            await app_module.SearchState._load_comparison(state, 620)
+
+        self.assertEqual(
+            state.cheapshark_currency_notice,
+            CHEAPSHARK_USD_FALLBACK_NOTICE,
+        )
+        self.assertEqual(state.price_cents, 659)
+
     async def test_gog_failure_keeps_steam_price_and_sets_warning(self) -> None:
         state = self.make_state()
         steam_price = SteamPrice(
@@ -170,7 +357,8 @@ class SearchStateComparisonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.price_cents, 659)
         self.assertEqual(state.price_status, "paid")
         self.assertEqual(state.gog_status, "")
-        self.assertIn("indisponível", state.gog_error)
+        self.assertEqual(state.gog_error, "network failure")
+        self.assertTrue(state.gog_retryable)
         self.assertFalse(state.is_loading_price)
         self.assertFalse(state.is_loading_gog)
 
@@ -262,18 +450,38 @@ class SearchStateComparisonTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_steam_failure_is_reported_on_comparison_route(self) -> None:
         state = self.make_state()
-        with patch.object(
-            app_module,
-            "get_steam_game_price",
-            new=AsyncMock(
-                side_effect=app_module.SteamServiceError("Steam indisponível")
+        offers = [
+            CheapSharkOffer(
+                store_name="DreamGame",
+                price_label="US$ 1,00",
+                deal_url="https://www.cheapshark.com/redirect?dealID=deal",
+                price_brl_minor=None,
+                is_approximate=False,
+            )
+        ]
+        with (
+            patch.object(
+                app_module,
+                "get_steam_game_price",
+                new=AsyncMock(
+                    side_effect=app_module.SteamServiceError(
+                        "A Steam está indisponível."
+                    )
+                ),
             ),
+            patch.object(
+                app_module,
+                "search_cheapshark_offers",
+                new=AsyncMock(return_value=offers),
+            ) as cheapshark_search,
         ):
             await app_module.SearchState._load_comparison(state, 620)
 
-        self.assertEqual(state.price_error, "Steam indisponível")
+        cheapshark_search.assert_awaited_once_with(620)
+        self.assertEqual(state.price_error, "A Steam está indisponível.")
         self.assertFalse(state.is_loading_price)
         self.assertEqual(state.price_status, "")
+        self.assertEqual(state.cheapshark_offers[0].store_name, "DreamGame")
 
     async def test_invalid_comparison_id_is_rejected_without_request(self) -> None:
         state = self.make_state()
@@ -311,6 +519,107 @@ class SearchStateComparisonTests(unittest.IsolatedAsyncioTestCase):
         state.gog_price_cents = 0
         self.assertTrue(state.steam_is_cheapest)
         self.assertTrue(state.gog_is_cheapest)
+
+    async def test_cheapshark_retry_only_reloads_its_own_provider(self) -> None:
+        state = self.make_state()
+        state.selected_app_id = 620
+        state.price_cents = 659
+        state.price_status = "paid"
+        state.cheapshark_error = "Falha temporária."
+        state.cheapshark_retryable = True
+        offers = [
+            CheapSharkOffer(
+                store_name="DreamGame",
+                price_label="US$ 1,00",
+                deal_url="https://www.cheapshark.com/redirect?dealID=deal",
+                price_brl_minor=None,
+                is_approximate=False,
+            )
+        ]
+        with (
+            patch.object(
+                app_module,
+                "search_cheapshark_offers",
+                new=AsyncMock(return_value=offers),
+            ) as cheapshark_search,
+            patch.object(app_module, "get_steam_game_price", new=AsyncMock()) as steam,
+            patch.object(app_module, "search_gog_offer", new=AsyncMock()) as gog,
+        ):
+            await app_module.SearchState.retry_cheapshark.fn(state)
+
+        cheapshark_search.assert_awaited_once_with(620)
+        steam.assert_not_awaited()
+        gog.assert_not_awaited()
+        self.assertFalse(state.cheapshark_retryable)
+        self.assertEqual(state.price_cents, 659)
+
+    async def test_steam_retry_failure_preserves_other_provider_results(self) -> None:
+        state = self.make_state()
+        state.selected_app_id = 620
+        state.cheapshark_offers = [
+            CheapSharkOffer(
+                store_name="DreamGame",
+                price_label="US$ 1,00",
+                deal_url="https://www.cheapshark.com/redirect?dealID=deal",
+                price_brl_minor=None,
+                is_approximate=False,
+            )
+        ]
+        with patch.object(
+            app_module,
+            "get_steam_game_price",
+            new=AsyncMock(
+                side_effect=app_module.SteamServiceError("Steam indisponível")
+            ),
+        ):
+            await app_module.SearchState.retry_steam.fn(state)
+
+        self.assertEqual(state.cheapshark_offers[0].store_name, "DreamGame")
+        self.assertEqual(state.price_error, "Steam indisponível")
+        self.assertTrue(state.steam_retryable)
+
+    async def test_gog_retry_only_reloads_gog_and_updates_comparable_prices(self) -> None:
+        state = self.make_state()
+        state.selected_app_id = 620
+        state.selected_name = "Portal 2"
+        state.gog_retryable = True
+        state.price_status = "paid"
+        state.price_cents = 659
+        result = GogMatchResult(
+            status="matched",
+            offer=GogOffer(
+                product_id="portal2",
+                title="Portal 2",
+                store_url="https://www.gog.com/en/game/portal_2",
+                cover_url="https://images.gog-statics.com/portal2.png",
+                status="paid",
+                final_price_minor=499,
+            ),
+        )
+        with (
+            patch.object(
+                app_module,
+                "search_gog_offer",
+                new=AsyncMock(return_value=result),
+            ) as gog_search,
+            patch.object(
+                app_module,
+                "get_steam_game_price",
+                new=AsyncMock(),
+            ) as steam,
+            patch.object(
+                app_module,
+                "search_cheapshark_offers",
+                new=AsyncMock(),
+            ) as cheapshark_search,
+        ):
+            await app_module.SearchState.retry_gog.fn(state)
+
+        gog_search.assert_awaited_once_with("Portal 2")
+        steam.assert_not_awaited()
+        cheapshark_search.assert_not_awaited()
+        self.assertEqual(state.gog_price_cents, 499)
+        self.assertFalse(state.gog_retryable)
 
     async def test_late_selection_response_cannot_replace_newer_selection(self) -> None:
         state = self.make_state()

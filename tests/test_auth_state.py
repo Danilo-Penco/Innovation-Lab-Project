@@ -64,6 +64,7 @@ class AuthStateTests(unittest.IsolatedAsyncioTestCase):
         redirect = AuthState.logout.fn(state)
 
         self.assertIsNotNone(redirect)
+        self.assertIn("/entrar", repr(redirect))
         self.assertIsNone(state._auth_token)
         self.assertFalse(state._catalog_authorized)
         self.assertFalse(state.is_splash_visible)
@@ -87,6 +88,15 @@ class AuthStateTests(unittest.IsolatedAsyncioTestCase):
         AuthState.open_register.fn(state)
         self.assertFalse(state.password_visible)
 
+    def test_open_login_uses_entrar_route(self) -> None:
+        state = build_state(name="Ada Lovelace", password="secret")
+
+        redirect = AuthState.open_login.fn(state)
+
+        self.assertIn("/entrar", repr(redirect))
+        self.assertEqual(state.name, "")
+        self.assertEqual(state.password, "")
+
     async def test_login_success_stores_token_only_after_xano_success(self) -> None:
         state = build_state()
         with patch(
@@ -103,10 +113,43 @@ class AuthStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state.password_visible)
         self.assertFalse(state.is_submitting)
 
+    async def test_login_requires_fields_and_rejects_password_over_128_characters(self) -> None:
+        cases = (
+            ({"email": "  "}, "Informe seu e-mail."),
+            ({"password": ""}, "Informe a senha."),
+            (
+                {"password": "x" * 129},
+                "A senha deve ter no máximo 128 caracteres.",
+            ),
+        )
+        for overrides, expected_message in cases:
+            with self.subTest(expected_message=expected_message):
+                state = build_state(password_visible=True, **overrides)
+                with patch(
+                    "Projeto.Projeto.xano.login",
+                    new=AsyncMock(),
+                ) as login:
+                    await AuthState.login.fn(state)
+
+                login.assert_not_awaited()
+                self.assertEqual(state.auth_error, expected_message)
+                self.assertFalse(state.password_visible)
+                self.assertFalse(state.is_submitting)
+
+    async def test_login_sends_short_password_without_strength_validation(self) -> None:
+        state = build_state(password="x")
+        with patch(
+            "Projeto.Projeto.xano.login",
+            new=AsyncMock(return_value=AuthSession("valid-token", 42)),
+        ) as login:
+            await AuthState.login.fn(state)
+
+        login.assert_awaited_once_with(state.email, "x")
+
     async def test_login_errors_keep_session_clear_and_show_expected_message(self) -> None:
         cases = (
             (InvalidCredentialsError("private detail"), "E-mail ou senha inválidos."),
-            (AuthInputError("Informe um e-mail válido."), "Informe um e-mail válido."),
+            (AuthInputError("Informe um e-mail válido."), "E-mail ou senha inválidos."),
             (
                 XanoApiError(
                     400,
@@ -114,8 +157,9 @@ class AuthStateTests(unittest.IsolatedAsyncioTestCase):
                     "Rejected valid password",
                     "password",
                 ),
-                "Rejected [redigida] (HTTP 400, ERROR_CODE_INPUT_ERROR, campo password)",
+                "E-mail ou senha inválidos.",
             ),
+            (XanoApiError(500, "ERROR_CODE_UNKNOWN", "Internal detail"), "E-mail ou senha inválidos."),
             (XanoUnavailableError("network detail"), AUTH_SERVICE_UNAVAILABLE_MESSAGE),
         )
         for error, expected_message in cases:
@@ -197,6 +241,7 @@ class AuthStateTests(unittest.IsolatedAsyncioTestCase):
         unauthenticated = build_state()
         redirect = await AuthState.guard_catalog.fn(unauthenticated)
         self.assertIsNotNone(redirect)
+        self.assertIn("/entrar", repr(redirect))
         self.assertFalse(unauthenticated._catalog_authorized)
 
         authenticated = build_state(_auth_token="invalid-token")
@@ -207,6 +252,7 @@ class AuthStateTests(unittest.IsolatedAsyncioTestCase):
             redirect = await AuthState.guard_catalog.fn(authenticated)
 
         self.assertIsNotNone(redirect)
+        self.assertIn("/entrar", repr(redirect))
         self.assertIn("session=expired", repr(redirect))
         self.assertIsNone(authenticated._auth_token)
         self.assertFalse(authenticated._catalog_authorized)

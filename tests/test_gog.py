@@ -11,6 +11,8 @@ from Projeto.gog import (
     parse_catalog_results,
     search_gog_offer,
 )
+from Projeto import external_api
+from Projeto.price_metadata import GOG_LOGO_URL
 
 
 def gog_product(
@@ -147,6 +149,10 @@ class GogCatalogParsingTests(unittest.TestCase):
 class GogHttpTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         _METADATA_CACHE.clear()
+        external_api._RATE_LIMIT_UNTIL.clear()
+
+    async def asyncTearDown(self) -> None:
+        external_api._RATE_LIMIT_UNTIL.clear()
 
     async def test_search_uses_public_brazil_catalog_parameters(self) -> None:
         def respond(request: httpx.Request) -> httpx.Response:
@@ -169,6 +175,33 @@ class GogHttpTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.MockTransport(respond),
         )
         self.assertEqual(offer.status, "matched")
+        self.assertIsNotNone(offer.offer)
+        assert offer.offer is not None
+        self.assertEqual(offer.offer.source_currency, "BRL")
+        self.assertEqual(offer.offer.original_price_minor, 19999)
+        self.assertEqual(offer.offer.price_brl_minor, 19999)
+        self.assertEqual(offer.offer.store_logo_url, GOG_LOGO_URL)
+        self.assertIsNone(offer.offer.source_updated_at)
+        self.assertIsNotNone(offer.offer.fetched_at)
+
+    async def test_rate_limit_is_not_retried_and_has_a_gog_message(self) -> None:
+        calls = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "30"},
+                request=request,
+            )
+
+        transport = httpx.MockTransport(respond)
+        for _ in range(2):
+            with self.assertRaisesRegex(GogServiceError, "limite temporário"):
+                await search_gog_offer("Baldur's Gate 3", transport=transport)
+
+        self.assertEqual(calls, 1)
 
     async def test_silksong_retries_without_punctuation_and_matches_brl_offer(self) -> None:
         requested_queries: list[str] = []

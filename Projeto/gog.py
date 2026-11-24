@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 from urllib.parse import urlparse
@@ -12,9 +12,11 @@ from urllib.parse import urlparse
 import httpx
 
 from Projeto.cache import MemoryTTLCache
+from Projeto.external_api import PublicApiRequestError, get_json
+from Projeto.price_metadata import GOG_LOGO_URL, utc_now
 
 GOG_CATALOG_URL = "https://catalog.gog.com/v1/catalog"
-GOG_TIMEOUT_SECONDS = 8.0
+GOG_TIMEOUT_SECONDS = 10.0
 GOG_COVER_HOST = "images.gog-statics.com"
 GOG_STORE_HOST = "www.gog.com"
 GOG_METADATA_CACHE_MAX_ENTRIES = 256
@@ -49,6 +51,21 @@ class GogOffer:
     cover_url: str
     status: GogPriceStatus
     final_price_minor: int | None = None
+    source_currency: Literal["BRL"] = "BRL"
+    store_name: str = "GOG"
+    store_logo_url: str = GOG_LOGO_URL
+    source_updated_at: datetime | None = None
+    fetched_at: datetime | None = None
+
+    @property
+    def original_price_minor(self) -> int | None:
+        return self.final_price_minor
+
+    @property
+    def price_brl_minor(self) -> int | None:
+        if self.status in ("paid", "free"):
+            return self.final_price_minor or 0
+        return None
 
 
 @dataclass(frozen=True)
@@ -244,6 +261,11 @@ def _cache_match_metadata(
             cover_url=metadata.cover_url,
             status=offer.status,
             final_price_minor=offer.final_price_minor,
+            source_currency=offer.source_currency,
+            store_name=offer.store_name,
+            store_logo_url=offer.store_logo_url,
+            source_updated_at=offer.source_updated_at,
+            fetched_at=offer.fetched_at,
         ),
     )
 
@@ -253,29 +275,34 @@ async def _get_json(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> object:
     try:
-        async with httpx.AsyncClient(
-            timeout=GOG_TIMEOUT_SECONDS,
+        return await get_json(
+            GOG_CATALOG_URL,
+            params,
+            timeout_seconds=GOG_TIMEOUT_SECONDS,
             transport=transport,
-        ) as client:
-            response = await client.get(GOG_CATALOG_URL, params=params)
-            response.raise_for_status()
-            return response.json()
-    except httpx.TimeoutException as error:
-        raise GogServiceError(
-            "A GOG demorou demais para responder. Tente novamente."
-        ) from error
-    except httpx.HTTPStatusError as error:
-        raise GogServiceError(
-            "A GOG não está disponível no momento. Tente novamente."
-        ) from error
-    except httpx.RequestError as error:
-        raise GogServiceError(
-            "Não foi possível conectar à GOG. Tente novamente."
-        ) from error
-    except (json.JSONDecodeError, ValueError) as error:
-        raise GogServiceError(
-            "A GOG retornou uma resposta inválida. Tente novamente."
-        ) from error
+        )
+    except PublicApiRequestError as error:
+        messages = {
+            "rate_limited": (
+                "A GOG atingiu o limite temporário. Tente novamente mais tarde."
+            ),
+            "timeout": "A GOG demorou demais para responder. Tente novamente.",
+            "network": "Não foi possível conectar à GOG. Tente novamente.",
+            "http": "A GOG não está disponível no momento. Tente novamente.",
+            "invalid_json": (
+                "A GOG retornou uma resposta inválida. Tente novamente."
+            ),
+        }
+        raise GogServiceError(messages[error.kind]) from error
+
+
+def _stamp_fetch_time(result: GogMatchResult) -> GogMatchResult:
+    if result.offer is None:
+        return result
+    return replace(
+        result,
+        offer=replace(result.offer, fetched_at=utc_now()),
+    )
 
 
 async def search_gog_offer(
@@ -299,7 +326,7 @@ async def search_gog_offer(
     payload = await _get_json(params, transport=transport)
     result = parse_catalog_results(payload, normalized_title)
     if result.status == "matched":
-        return _cache_match_metadata(cache_key, result)
+        return _stamp_fetch_time(_cache_match_metadata(cache_key, result))
 
     normalized_query = _normalize_query(normalized_title)
     if normalized_query == normalized_title:
@@ -324,10 +351,12 @@ async def search_gog_offer(
         if not isinstance(product_id, (str, int)) or isinstance(product_id, bool):
             raise GogServiceError("A GOG retornou um resultado inválido.")
         combined_products[str(product_id)] = product
-    return _cache_match_metadata(
-        cache_key,
-        parse_catalog_results(
-            {"products": list(combined_products.values())},
-            normalized_title,
-        ),
+    return _stamp_fetch_time(
+        _cache_match_metadata(
+            cache_key,
+            parse_catalog_results(
+                {"products": list(combined_products.values())},
+                normalized_title,
+            ),
+        )
     )

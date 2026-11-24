@@ -21,12 +21,13 @@ class MemoryTTLCache(Generic[Key, Value]):
         max_entries: int,
         ttl_seconds: float = MAX_TTL_SECONDS,
         clock: Callable[[], float] = monotonic,
+        max_ttl_seconds: float = MAX_TTL_SECONDS,
     ) -> None:
         if max_entries < 1:
             raise ValueError("max_entries must be positive.")
-        if not 0 < ttl_seconds <= MAX_TTL_SECONDS:
+        if not 0 < max_ttl_seconds or not 0 < ttl_seconds <= max_ttl_seconds:
             raise ValueError(
-                f"ttl_seconds must be between 0 and {MAX_TTL_SECONDS}."
+                f"ttl_seconds must be between 0 and {max_ttl_seconds}."
             )
         self._max_entries = max_entries
         self._ttl_seconds = ttl_seconds

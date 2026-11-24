@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
 
 from Projeto.cache import MemoryTTLCache
+from Projeto.external_api import PublicApiRequestError, get_json
+from Projeto.price_metadata import STEAM_LOGO_URL, utc_now
 
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
 STEAM_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
-STEAM_TIMEOUT_SECONDS = 8.0
+STEAM_TIMEOUT_SECONDS = 10.0
 MAX_SEARCH_LENGTH = 100
 STEAM_SEARCH_CACHE_MAX_ENTRIES = 256
 
@@ -46,6 +48,21 @@ class SteamPrice:
     status: PriceStatus
     final_price_minor: int | None = None
     header_image: str = ""
+    source_currency: Literal["BRL"] = "BRL"
+    store_name: str = "Steam"
+    store_logo_url: str = STEAM_LOGO_URL
+    source_updated_at: datetime | None = None
+    fetched_at: datetime | None = None
+
+    @property
+    def original_price_minor(self) -> int | None:
+        return self.final_price_minor
+
+    @property
+    def price_brl_minor(self) -> int | None:
+        if self.status in ("paid", "free"):
+            return self.final_price_minor or 0
+        return None
 
 
 def validate_search_term(term: str) -> str:
@@ -212,29 +229,25 @@ async def _get_json(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> object:
     try:
-        async with httpx.AsyncClient(
-            timeout=STEAM_TIMEOUT_SECONDS,
+        return await get_json(
+            url,
+            params,
+            timeout_seconds=STEAM_TIMEOUT_SECONDS,
             transport=transport,
-        ) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-    except httpx.TimeoutException as error:
-        raise SteamServiceError(
-            "A Steam demorou demais para responder. Tente novamente."
-        ) from error
-    except httpx.HTTPStatusError as error:
-        raise SteamServiceError(
-            "A Steam não está disponível no momento. Tente novamente."
-        ) from error
-    except httpx.RequestError as error:
-        raise SteamServiceError(
-            "Não foi possível conectar à Steam. Tente novamente."
-        ) from error
-    except (json.JSONDecodeError, ValueError) as error:
-        raise SteamServiceError(
-            "A Steam retornou uma resposta inválida. Tente novamente."
-        ) from error
+        )
+    except PublicApiRequestError as error:
+        messages = {
+            "rate_limited": (
+                "A Steam atingiu o limite temporário. Tente novamente mais tarde."
+            ),
+            "timeout": "A Steam demorou demais para responder. Tente novamente.",
+            "network": "Não foi possível conectar à Steam. Tente novamente.",
+            "http": "A Steam não está disponível no momento. Tente novamente.",
+            "invalid_json": (
+                "A Steam retornou uma resposta inválida. Tente novamente."
+            ),
+        }
+        raise SteamServiceError(messages[error.kind]) from error
 
 
 async def search_steam_games(
@@ -271,4 +284,7 @@ async def get_steam_game_price(
         {"appids": app_id, "cc": "br", "l": "brazilian"},
         transport=transport,
     )
-    return parse_game_price(payload, app_id)
+    return replace(
+        parse_game_price(payload, app_id),
+        fetched_at=utc_now(),
+    )

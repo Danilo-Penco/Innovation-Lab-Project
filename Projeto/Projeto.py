@@ -1,3 +1,6 @@
+import asyncio
+from dataclasses import replace
+
 import reflex as rx
 
 from Projeto import xano
@@ -8,11 +11,24 @@ from Projeto.catalog import (
     build_steam_search_url,
     select_catalog_games,
 )
+from Projeto.cheapshark import (
+    CHEAPSHARK_CONVERSION_NOTICE,
+    CHEAPSHARK_NO_OFFERS_MESSAGE,
+    CHEAPSHARK_USD_FALLBACK_NOTICE,
+    CheapSharkOffer,
+    CheapSharkServiceError,
+    search_cheapshark_offers,
+)
 from Projeto.gog import (
     GogMatchResult,
     GogOffer,
     GogServiceError,
     search_gog_offer,
+)
+from Projeto.price_metadata import (
+    GOG_LOGO_URL,
+    STEAM_LOGO_URL,
+    format_price_timestamp,
 )
 from Projeto.steam import (
     InvalidSearchTerm,
@@ -25,8 +41,29 @@ from Projeto.steam import (
     search_steam_games,
     validate_search_term,
 )
+from Projeto.theme import THEME_CSS
 
 SESSION_EXPIRED_MESSAGE = "Sua sessão expirou. Entre novamente para continuar."
+
+
+def _lowest_comparable_price(
+    steam_status: str,
+    steam_price_cents: int,
+    gog_status: str,
+    gog_price_cents: int,
+    cheapshark_offers: list[CheapSharkOffer],
+) -> int | None:
+    prices: list[int] = []
+    if steam_status in ("paid", "free"):
+        prices.append(steam_price_cents)
+    if gog_status in ("paid", "free"):
+        prices.append(gog_price_cents)
+    prices.extend(
+        offer.price_brl_minor
+        for offer in cheapshark_offers
+        if offer.price_brl_minor is not None
+    )
+    return min(prices) if len(prices) > 1 else None
 
 
 class SearchState(rx.State):
@@ -45,9 +82,20 @@ class SearchState(rx.State):
     gog_status: str = ""
     gog_price_cents: int = 0
     gog_error: str = ""
+    gog_updated_label: str = ""
+    gog_logo_url: str = GOG_LOGO_URL
+    gog_retryable: bool = False
+    cheapshark_offers: list[CheapSharkOffer] = []
+    cheapshark_error: str = ""
+    cheapshark_currency_notice: str = ""
+    cheapshark_retryable: bool = False
+    steam_updated_label: str = ""
+    steam_logo_url: str = STEAM_LOGO_URL
+    steam_retryable: bool = False
     is_searching: bool = False
     is_loading_price: bool = False
     is_loading_gog: bool = False
+    is_loading_cheapshark: bool = False
     no_results: bool = False
     _search_request_id: int = 0
     _price_request_id: int = 0
@@ -105,16 +153,27 @@ class SearchState(rx.State):
         self.price_status = ""
         self.price_cents = 0
         self.selected_cover_url = ""
+        self.steam_updated_label = ""
+        self.steam_logo_url = STEAM_LOGO_URL
+        self.steam_retryable = False
         self.gog_title = ""
         self.gog_store_url = ""
         self.gog_cover_url = ""
         self.gog_status = ""
         self.gog_price_cents = 0
         self.gog_error = ""
+        self.gog_updated_label = ""
+        self.gog_logo_url = GOG_LOGO_URL
+        self.gog_retryable = False
+        self.cheapshark_offers = []
+        self.cheapshark_error = ""
+        self.cheapshark_currency_notice = ""
+        self.cheapshark_retryable = False
         self.selected_app_id = 0
         self.selected_name = ""
         self.is_loading_price = False
         self.is_loading_gog = False
+        self.is_loading_cheapshark = False
 
     @rx.var
     def formatted_price(self) -> str:
@@ -139,19 +198,37 @@ class SearchState(rx.State):
 
     @rx.var
     def steam_is_cheapest(self) -> bool:
+        lowest = _lowest_comparable_price(
+            self.price_status,
+            self.price_cents,
+            self.gog_status,
+            self.gog_price_cents,
+            self.cheapshark_offers,
+        )
         return (
             self.price_status in ("paid", "free")
-            and self.gog_status in ("paid", "free")
-            and self.price_cents <= self.gog_price_cents
+            and lowest is not None
+            and self.price_cents == lowest
         )
 
     @rx.var
     def gog_is_cheapest(self) -> bool:
-        return (
-            self.price_status in ("paid", "free")
-            and self.gog_status in ("paid", "free")
-            and self.gog_price_cents <= self.price_cents
+        lowest = _lowest_comparable_price(
+            self.price_status,
+            self.price_cents,
+            self.gog_status,
+            self.gog_price_cents,
+            self.cheapshark_offers,
         )
+        return (
+            self.gog_status in ("paid", "free")
+            and lowest is not None
+            and self.gog_price_cents == lowest
+        )
+
+    @rx.var
+    def has_cheapshark_offers(self) -> bool:
+        return bool(self.cheapshark_offers)
 
     @rx.event
     def select_game(self, app_id: int):
@@ -160,6 +237,8 @@ class SearchState(rx.State):
             self.search_error = "Selecione um jogo da lista de resultados."
             return
 
+        self.selected_app_id = game.app_id
+        self.selected_name = game.name
         return rx.redirect(f"/comparar?app_id={game.app_id}")
 
     @rx.event
@@ -184,16 +263,26 @@ class SearchState(rx.State):
     async def _load_comparison(self, app_id: int):
         self._price_request_id += 1
         request_id = self._price_request_id
+        requested_name = (
+            self.selected_name
+            if self.selected_app_id == app_id
+            else ""
+        ) or next(
+            (game.name for game in CATALOG_GAMES if game.app_id == app_id),
+            "",
+        )
         self._clear_comparison()
         self.selected_app_id = app_id
+        self.selected_name = requested_name
         self.is_loading_price = True
 
+        steam_result: SteamPrice | None = None
         try:
             steam_result = await get_steam_game_price(app_id)
         except SteamServiceError as error:
             if request_id == self._price_request_id:
                 self.price_error = str(error)
-            return
+                self.steam_retryable = True
         finally:
             if request_id == self._price_request_id:
                 self.is_loading_price = False
@@ -201,43 +290,107 @@ class SearchState(rx.State):
         if request_id != self._price_request_id or self.selected_app_id != app_id:
             return
 
-        self._apply_steam_price(steam_result)
-        self.is_loading_gog = True
+        if steam_result is not None:
+            self._apply_steam_price(steam_result)
 
+        title = self.selected_name
+        self.is_loading_gog = bool(title)
+        self.is_loading_cheapshark = True
         try:
-            gog_result = await search_gog_offer(steam_result.name)
-        except GogServiceError:
-            if request_id == self._price_request_id:
-                self.gog_error = (
-                    "A comparação com a GOG está indisponível no momento."
-                )
-        else:
-            if (
-                request_id != self._price_request_id
-                or self.selected_app_id != app_id
-            ):
+            tasks = [search_cheapshark_offers(app_id)]
+            if title:
+                tasks.insert(0, search_gog_offer(title))
+            results = await asyncio.gather(
+                *tasks,
+                return_exceptions=True,
+            )
+            if request_id != self._price_request_id or self.selected_app_id != app_id:
                 return
-            if gog_result.status == "not_found":
-                self.gog_error = "Jogo não encontrado na GOG."
-            elif gog_result.status == "ambiguous":
-                self.gog_error = "Mais de uma possível correspondência na GOG."
-            elif (
-                gog_result.offer is not None
-                and gog_result.offer.status == "unavailable"
-            ):
-                self.gog_error = "Sem preço em BRL na GOG."
-            elif gog_result.offer is not None:
-                self._apply_gog_offer(gog_result.offer)
+
+            if title:
+                self._apply_gog_result(results[0])
+                cheapshark_result = results[1]
             else:
-                self.gog_error = "A comparação com a GOG está indisponível no momento."
+                cheapshark_result = results[0]
+            self._apply_cheapshark_result(cheapshark_result)
         finally:
             if request_id == self._price_request_id:
                 self.is_loading_gog = False
+                self.is_loading_cheapshark = False
+
+    def _apply_gog_result(self, result: GogMatchResult | BaseException) -> None:
+        if isinstance(result, GogServiceError):
+            self.gog_error = str(result)
+            self.gog_retryable = True
+        elif isinstance(result, BaseException):
+            raise result
+        elif result.status == "not_found":
+            self.gog_error = "Jogo não encontrado na GOG."
+        elif result.status == "ambiguous":
+            self.gog_error = "Mais de uma possível correspondência na GOG."
+        elif result.offer is not None and result.offer.status == "unavailable":
+            self.gog_error = "Sem preço em BRL na GOG."
+        elif result.offer is not None:
+            self._apply_gog_offer(result.offer)
+        else:
+            self.gog_error = "A comparação com a GOG está indisponível."
+
+    def _apply_cheapshark_result(
+        self,
+        result: list[CheapSharkOffer] | BaseException,
+    ) -> None:
+        if isinstance(result, CheapSharkServiceError):
+            self.cheapshark_error = (
+                f"{result} Steam e GOG continuam disponíveis."
+            )
+            self.cheapshark_retryable = True
+        elif isinstance(result, BaseException):
+            raise result
+        elif result:
+            self._apply_cheapshark_offers(result)
+        else:
+            self.cheapshark_error = CHEAPSHARK_NO_OFFERS_MESSAGE
+            self.cheapshark_retryable = True
+
+    def _apply_cheapshark_offers(self, offers: list[CheapSharkOffer]) -> None:
+        lowest = _lowest_comparable_price(
+            self.price_status,
+            self.price_cents,
+            self.gog_status,
+            self.gog_price_cents,
+            offers,
+        )
+        self.cheapshark_offers = [
+            replace(
+                offer,
+                is_cheapest=(
+                    lowest is not None
+                    and offer.price_brl_minor == lowest
+                ),
+            )
+            for offer in offers
+        ]
+        self.cheapshark_error = ""
+        self.cheapshark_retryable = False
+        if any(offer.is_approximate for offer in offers):
+            self.cheapshark_currency_notice = CHEAPSHARK_CONVERSION_NOTICE
+        elif any(offer.price_brl_minor is None for offer in offers):
+            self.cheapshark_currency_notice = CHEAPSHARK_USD_FALLBACK_NOTICE
+        else:
+            self.cheapshark_currency_notice = ""
 
     def _apply_steam_price(self, price: SteamPrice):
         self.price_status = price.status
         self.price_cents = price.final_price_minor or 0
         self.selected_cover_url = price.header_image
+        self.steam_logo_url = price.store_logo_url or STEAM_LOGO_URL
+        self.steam_updated_label = format_price_timestamp(
+            price.source_updated_at,
+            price.fetched_at,
+            price.store_name,
+        )
+        self.price_error = ""
+        self.steam_retryable = False
         if price.name:
             self.selected_name = price.name
 
@@ -247,6 +400,89 @@ class SearchState(rx.State):
         self.gog_cover_url = offer.cover_url
         self.gog_status = offer.status
         self.gog_price_cents = offer.final_price_minor or 0
+        self.gog_logo_url = offer.store_logo_url or GOG_LOGO_URL
+        self.gog_updated_label = format_price_timestamp(
+            offer.source_updated_at,
+            offer.fetched_at,
+            offer.store_name,
+        )
+        self.gog_error = ""
+        self.gog_retryable = False
+        self._apply_cheapshark_offers(self.cheapshark_offers)
+
+    @rx.event
+    async def retry_steam(self):
+        app_id = self.selected_app_id
+        if app_id <= 0 or self.is_loading_price:
+            return
+
+        request_id = self._price_request_id
+        self.price_error = ""
+        self.steam_retryable = False
+        self.is_loading_price = True
+        try:
+            price = await get_steam_game_price(app_id)
+        except SteamServiceError as error:
+            if request_id == self._price_request_id and self.selected_app_id == app_id:
+                self.price_error = str(error)
+                self.steam_retryable = True
+        else:
+            if request_id == self._price_request_id and self.selected_app_id == app_id:
+                self._apply_steam_price(price)
+                self._apply_cheapshark_offers(self.cheapshark_offers)
+        finally:
+            if request_id == self._price_request_id and self.selected_app_id == app_id:
+                self.is_loading_price = False
+
+    @rx.event
+    async def retry_gog(self):
+        title = self.selected_name
+        if not title or self.is_loading_gog:
+            return
+
+        request_id = self._price_request_id
+        app_id = self.selected_app_id
+        self.gog_error = ""
+        self.gog_retryable = False
+        self.is_loading_gog = True
+        try:
+            result = await search_gog_offer(title)
+        except GogServiceError as error:
+            if request_id == self._price_request_id and self.selected_app_id == app_id:
+                self.gog_error = str(error)
+                self.gog_retryable = True
+        else:
+            if request_id == self._price_request_id and self.selected_app_id == app_id:
+                self._apply_gog_result(result)
+                self._apply_cheapshark_offers(self.cheapshark_offers)
+        finally:
+            if request_id == self._price_request_id and self.selected_app_id == app_id:
+                self.is_loading_gog = False
+
+    @rx.event
+    async def retry_cheapshark(self):
+        app_id = self.selected_app_id
+        if app_id <= 0 or self.is_loading_cheapshark:
+            return
+
+        request_id = self._price_request_id
+        self.cheapshark_error = ""
+        self.cheapshark_retryable = False
+        self.is_loading_cheapshark = True
+        try:
+            offers = await search_cheapshark_offers(app_id)
+        except CheapSharkServiceError as error:
+            if request_id == self._price_request_id and self.selected_app_id == app_id:
+                self.cheapshark_error = (
+                    f"{error} Steam e GOG continuam disponíveis."
+                )
+                self.cheapshark_retryable = True
+        else:
+            if request_id == self._price_request_id and self.selected_app_id == app_id:
+                self._apply_cheapshark_result(offers)
+        finally:
+            if request_id == self._price_request_id and self.selected_app_id == app_id:
+                self.is_loading_cheapshark = False
 
 
 class AuthState(rx.State):
@@ -301,7 +537,7 @@ class AuthState(rx.State):
         self.password = ""
         self.password_visible = False
         self.name = ""
-        return rx.redirect("/")
+        return rx.redirect("/entrar")
 
     @rx.event
     def prepare_form(self):
@@ -336,7 +572,7 @@ class AuthState(rx.State):
         self.password = ""
         self.password_visible = False
         self.auth_error = ""
-        return rx.redirect("/")
+        return rx.redirect("/entrar")
 
     def _start_authenticated_transition(self, session: xano.AuthSession):
         self._auth_token = session.auth_token
@@ -354,8 +590,22 @@ class AuthState(rx.State):
     @rx.event
     async def login(self):
         self.auth_error = ""
-        self.is_submitting = True
         self.password_visible = False
+
+        if not self.email.strip():
+            self.auth_error = "Informe seu e-mail."
+            return
+        if not self.password:
+            self.auth_error = "Informe a senha."
+            return
+        if len(self.password) > xano.MAX_PASSWORD_LENGTH:
+            self.auth_error = (
+                "A senha deve ter no máximo "
+                f"{xano.MAX_PASSWORD_LENGTH} caracteres."
+            )
+            return
+
+        self.is_submitting = True
         self._auth_token = None
         self._catalog_authorized = False
         try:
@@ -366,14 +616,14 @@ class AuthState(rx.State):
             self.is_submitting = False
             self.auth_error = "E-mail ou senha inválidos."
             return
-        except xano.AuthInputError as error:
+        except xano.AuthInputError:
             self.password = ""
             self.password_visible = False
             self.is_submitting = False
-            self.auth_error = str(error)
+            self.auth_error = "E-mail ou senha inválidos."
             return
-        except xano.XanoApiError as error:
-            self.auth_error = self._api_error_message(error)
+        except xano.XanoApiError:
+            self.auth_error = "E-mail ou senha inválidos."
             self.password = ""
             self.password_visible = False
             self.is_submitting = False
@@ -422,13 +672,13 @@ class AuthState(rx.State):
         self.auth_error = ""
         if not isinstance(auth_token, str) or not auth_token:
             self._auth_token = None
-            return rx.redirect("/")
+            return rx.redirect("/entrar")
 
         try:
             user = await xano.me(auth_token)
         except xano.InvalidTokenError:
             self._auth_token = None
-            return rx.redirect("/?session=expired")
+            return rx.redirect("/entrar?session=expired")
         except xano.XanoApiError as error:
             self.auth_error = self._api_error_message(error)
             return
@@ -468,8 +718,42 @@ class CatalogState(rx.State):
         return rx.redirect(search_url)
 
 
+def brand_content(horizontal: bool = False) -> rx.Component:
+    children = [
+        rx.icon("gamepad-2", size=22 if horizontal else 38, color="var(--ck-purple)"),
+        rx.text(
+            "ComparaKeys",
+            size="4" if horizontal else "2",
+            weight="bold",
+            color="var(--ck-purple-light)",
+            letter_spacing="0.08em" if horizontal else "0.18em",
+        ),
+    ]
+    if horizontal:
+        return rx.hstack(*children, align="center", spacing="2")
+    return rx.vstack(*children, align="center", spacing="2")
+
+
+def brand_link(href: str, horizontal: bool = False) -> rx.Component:
+    return rx.link(
+        brand_content(horizontal),
+        href=href,
+        color="inherit",
+        text_decoration="none",
+        aria_label="ComparaKeys — início",
+    )
+
+
+def session_brand_link(horizontal: bool = False) -> rx.Component:
+    return rx.cond(
+        AuthState.is_authenticated,
+        brand_link("/catalogo", horizontal=horizontal),
+        brand_link("/", horizontal=horizontal),
+    )
+
+
 # Estilo global: fade-in suave ao carregar a página
-GLOBAL_CSS = """
+GLOBAL_CSS = THEME_CSS + """
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
@@ -482,7 +766,12 @@ GLOBAL_CSS = """
     50% { box-shadow: 0 0 42px rgba(139, 92, 246, 0.48); }
 }
 .auth-card {
+    background: var(--ck-surface);
+    border-color: var(--ck-purple-border);
     animation: fadeIn 0.5s ease-out, glow 2.4s ease-in-out infinite;
+}
+.auth-page {
+    background: radial-gradient(circle at 50% 25%, #261442 0%, #0b0910 54%, var(--ck-black) 100%);
 }
 @media (max-height: 720px) {
     .auth-card {
@@ -509,6 +798,171 @@ GLOBAL_CSS = """
     gap: 1rem;
     width: 100%;
 }
+.landing-page {
+    width: 100%;
+    min-height: 100vh;
+    overflow-x: clip;
+    background: var(--ck-black);
+    color: var(--ck-text);
+}
+.landing-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    width: 100%;
+    min-height: calc(100vh - 64px);
+    min-height: calc(100svh - 64px);
+    background: var(--ck-black);
+}
+.landing-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-sizing: border-box;
+    width: 100%;
+    height: 64px;
+    min-height: 64px;
+    min-width: 0;
+    padding: 0 clamp(0.75rem, 4vw, 2rem);
+    border-bottom: 1px solid var(--ck-purple-border);
+    background-color: var(--ck-black);
+}
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+    .landing-topbar {
+        background-color: rgba(5, 4, 7, 0.9);
+        -webkit-backdrop-filter: blur(12px);
+        backdrop-filter: blur(12px);
+    }
+}
+.landing-topbar-brand {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: 2.75rem;
+    height: 2.75rem;
+    border-radius: 0.5rem;
+    text-decoration: none;
+}
+.landing-topbar-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    min-width: 0;
+}
+.landing-nav-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.5rem;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid var(--ck-purple);
+    border-radius: 0.65rem;
+    background: transparent;
+    color: var(--ck-purple-light);
+    font: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.landing-nav-button:hover {
+    filter: brightness(1.12);
+}
+.landing-nav-primary {
+    border-color: var(--ck-purple);
+    background: var(--ck-purple);
+    color: var(--ck-black);
+}
+.landing-hero-copy {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    padding: clamp(1.5rem, 5vw, 4rem);
+    text-align: center;
+    background: radial-gradient(circle at 50% 45%, #171022 0%, var(--ck-black) 72%);
+}
+.landing-hero-copy h1 {
+    margin: 0;
+    color: var(--ck-text);
+    font-size: clamp(2.4rem, 5vw, 5rem);
+    line-height: 1;
+    letter-spacing: -0.045em;
+}
+.landing-hero-art {
+    position: relative;
+    min-width: 0;
+    overflow: hidden;
+    isolation: isolate;
+    clip-path: polygon(18% 0, 100% 0, 100% 100%, 0 100%);
+    background:
+        radial-gradient(ellipse at 68% 32%, rgba(168, 85, 247, 0.8), transparent 34%),
+        radial-gradient(ellipse at 32% 78%, rgba(91, 33, 182, 0.7), transparent 38%),
+        linear-gradient(138deg, #09070e 4%, #24103d 47%, #08060c 100%);
+}
+.landing-hero-art::before,
+.landing-hero-art::after {
+    position: absolute;
+    inset: -15%;
+    content: "";
+    pointer-events: none;
+}
+.landing-hero-art::before {
+    z-index: -1;
+    background:
+        linear-gradient(116deg, transparent 20%, rgba(216, 180, 254, 0.7) 20.3%, transparent 21.1%),
+        linear-gradient(116deg, transparent 45%, rgba(168, 85, 247, 0.45) 45.3%, transparent 46%),
+        linear-gradient(116deg, transparent 72%, rgba(196, 181, 253, 0.55) 72.3%, transparent 73%);
+    filter: blur(1px);
+    transform: skewY(-8deg);
+}
+.landing-hero-art::after {
+    z-index: -2;
+    background:
+        radial-gradient(ellipse at 58% 47%, rgba(192, 132, 252, 0.3), transparent 20%),
+        linear-gradient(180deg, transparent 43%, rgba(5, 4, 7, 0.8) 100%);
+}
+.landing-divider {
+    width: 100%;
+    height: 2px;
+    background: #000000;
+}
+.landing-info-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: clamp(1rem, 2.5vw, 1.5rem);
+    width: min(100% - 2rem, 1100px);
+    margin: 0 auto;
+    padding: clamp(1.5rem, 4vw, 3rem) 0;
+}
+.landing-info-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    aspect-ratio: 1 / 1;
+    padding: clamp(1.25rem, 4vw, 3rem);
+    border: 1px solid rgba(167, 139, 250, 0.48);
+    border-radius: 1.25rem;
+    background: var(--ck-black);
+}
+.landing-info-card h2 {
+    color: var(--ck-purple-light);
+    font-size: clamp(1.3rem, 2.8vw, 2rem);
+    line-height: 1.2;
+}
+.landing-info-card p {
+    color: var(--ck-text-muted);
+    font-size: clamp(1rem, 1.5vw, 1.15rem);
+    line-height: 1.65;
+}
 @media (max-width: 600px) {
     .site-navbar {
         padding-inline: 0.75rem !important;
@@ -519,6 +973,19 @@ GLOBAL_CSS = """
     }
     .catalog-search > * {
         width: 100% !important;
+    }
+}
+@media (max-width: 700px) {
+    .landing-hero {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: 1fr 1fr;
+    }
+    .landing-hero-art {
+        clip-path: polygon(0 10%, 100% 0, 100% 100%, 0 100%);
+    }
+    .landing-info-grid {
+        grid-template-columns: minmax(0, 1fr);
+        width: min(100% - 2rem, 520px);
     }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -536,17 +1003,7 @@ GLOBAL_CSS = """
 
 def navbar() -> rx.Component:
     return rx.hstack(
-        rx.link(
-            rx.hstack(
-                rx.icon("gamepad-2", color="var(--violet-9)", size=22),
-                rx.text("ComparaKeys", weight="bold", size="4"),
-                align="center",
-                spacing="2",
-            ),
-            href="/catalogo",
-            color="inherit",
-            text_decoration="none",
-        ),
+        session_brand_link(horizontal=True),
         rx.spacer(),
         rx.cond(
             AuthState.is_authenticated,
@@ -562,7 +1019,7 @@ def navbar() -> rx.Component:
             ),
             rx.button(
                 "Entrar",
-                on_click=rx.redirect("/"),
+                on_click=rx.redirect("/entrar"),
                 variant="outline",
                 size="2",
                 style={
@@ -603,13 +1060,45 @@ def game_result(game: SteamGame) -> rx.Component:
     )
 
 
+def store_brand(
+    name: rx.Var[str] | str,
+    logo_url: rx.Var[str] | str,
+) -> rx.Component:
+    return rx.hstack(
+        rx.cond(
+            logo_url != "",
+            rx.box(
+                role="img",
+                aria_label=f"Logotipo da loja {name}",
+                width="2.5rem",
+                height="2.5rem",
+                flex="0 0 2.5rem",
+                border_radius="0.5rem",
+                background_color="var(--ck-surface)",
+                background_image=f'url("{logo_url}")',
+                background_position="center",
+                background_repeat="no-repeat",
+                background_size="contain",
+            ),
+            rx.fragment(),
+        ),
+        rx.text(name, weight="bold", color="white"),
+        align="center",
+        spacing="2",
+    )
+
+
 def price_comparison() -> rx.Component:
     return rx.vstack(
         rx.cond(
-            SearchState.is_loading_price | SearchState.is_loading_gog,
+            SearchState.is_loading_price
+            | SearchState.is_loading_gog
+            | SearchState.is_loading_cheapshark,
             rx.hstack(
                 rx.spinner(),
-                rx.text("Consultando preços atuais na Steam e na GOG..."),
+                rx.text(
+                    "Consultando preços atuais na Steam, na GOG e em outras lojas..."
+                ),
                 align="center",
                 role="status",
             ),
@@ -618,7 +1107,7 @@ def price_comparison() -> rx.Component:
         rx.box(
             rx.card(
                 rx.vstack(
-                    rx.text("STEAM", size="2", weight="bold", color="gray"),
+                    store_brand("Steam", SearchState.steam_logo_url),
                     rx.image(
                         src=SearchState.steam_cover_url,
                         alt=f"Capa de {SearchState.selected_name}",
@@ -687,6 +1176,16 @@ def price_comparison() -> rx.Component:
                         ),
                         rx.fragment(),
                     ),
+                    rx.cond(
+                        SearchState.steam_updated_label != "",
+                        rx.text(
+                            SearchState.steam_updated_label,
+                            color="#b8afc8",
+                            size="1",
+                            role="status",
+                        ),
+                        rx.fragment(),
+                    ),
                     align="stretch",
                     width="100%",
                     spacing="3",
@@ -701,7 +1200,7 @@ def price_comparison() -> rx.Component:
                 | (SearchState.gog_status == "free"),
                 rx.card(
                     rx.vstack(
-                        rx.text("GOG", size="2", weight="bold", color="gray"),
+                        store_brand("GOG", SearchState.gog_logo_url),
                         rx.image(
                             src=SearchState.gog_cover_url,
                             alt=f"Capa de {SearchState.gog_title}",
@@ -762,6 +1261,16 @@ def price_comparison() -> rx.Component:
                             ),
                             rx.fragment(),
                         ),
+                        rx.cond(
+                            SearchState.gog_updated_label != "",
+                            rx.text(
+                                SearchState.gog_updated_label,
+                                color="#b8afc8",
+                                size="1",
+                                role="status",
+                            ),
+                            rx.fragment(),
+                        ),
                         align="stretch",
                         width="100%",
                         spacing="3",
@@ -776,18 +1285,159 @@ def price_comparison() -> rx.Component:
             class_name="price-comparison-grid",
         ),
         rx.cond(
+            SearchState.has_cheapshark_offers,
+            rx.vstack(
+                rx.heading("Outras lojas", size="5", color="#e9ddff"),
+                rx.cond(
+                    SearchState.cheapshark_currency_notice != "",
+                    rx.text(
+                        SearchState.cheapshark_currency_notice,
+                        color="#b8afc8",
+                        size="2",
+                        role="status",
+                    ),
+                    rx.fragment(),
+                ),
+                rx.foreach(
+                    SearchState.cheapshark_offers,
+                    cheapshark_offer_card,
+                ),
+                align="stretch",
+                width="100%",
+                spacing="2",
+            ),
+            rx.fragment(),
+        ),
+        rx.cond(
+            SearchState.cheapshark_error != "",
+            rx.vstack(
+                rx.text(
+                    SearchState.cheapshark_error,
+                    color="gray",
+                    role="status",
+                ),
+                rx.cond(
+                    SearchState.cheapshark_retryable,
+                    rx.button(
+                        "Tentar novamente na CheapShark",
+                        on_click=SearchState.retry_cheapshark,
+                        disabled=SearchState.is_loading_cheapshark,
+                        variant="outline",
+                        size="2",
+                    ),
+                    rx.fragment(),
+                ),
+                align="start",
+                spacing="2",
+            ),
+            rx.fragment(),
+        ),
+        rx.cond(
             SearchState.price_error != "",
-            rx.text(SearchState.price_error, color="tomato", role="alert"),
+            rx.vstack(
+                rx.text(SearchState.price_error, color="tomato", role="alert"),
+                rx.cond(
+                    SearchState.steam_retryable,
+                    rx.button(
+                        "Tentar novamente na Steam",
+                        on_click=SearchState.retry_steam,
+                        disabled=SearchState.is_loading_price,
+                        variant="outline",
+                        size="2",
+                    ),
+                    rx.fragment(),
+                ),
+                align="start",
+                spacing="2",
+            ),
             rx.fragment(),
         ),
         rx.cond(
             SearchState.gog_error != "",
-            rx.text(SearchState.gog_error, color="gray", role="status"),
+            rx.vstack(
+                rx.text(SearchState.gog_error, color="gray", role="status"),
+                rx.cond(
+                    SearchState.gog_retryable,
+                    rx.button(
+                        "Tentar novamente na GOG",
+                        on_click=SearchState.retry_gog,
+                        disabled=SearchState.is_loading_gog,
+                        variant="outline",
+                        size="2",
+                    ),
+                    rx.fragment(),
+                ),
+                align="start",
+                spacing="2",
+            ),
             rx.fragment(),
         ),
         align="stretch",
         width="100%",
         spacing="3",
+    )
+
+
+def cheapshark_offer_card(offer: CheapSharkOffer) -> rx.Component:
+    return rx.card(
+        rx.hstack(
+            rx.vstack(
+                store_brand(offer.store_name, offer.store_logo_url),
+                rx.link(
+                    "Ver oferta",
+                    href=offer.deal_url,
+                    is_external=True,
+                    target="_blank",
+                    rel="noopener noreferrer",
+                    color="#c4b5fd",
+                    size="2",
+                ),
+                align="start",
+                spacing="1",
+            ),
+            rx.vstack(
+                rx.text(
+                    offer.price_label,
+                    color=rx.cond(offer.is_cheapest, "#4ade80", "white"),
+                    weight="bold",
+                ),
+                rx.cond(
+                    offer.is_cheapest,
+                    rx.text("Menor preço", color="#4ade80", size="2"),
+                    rx.fragment(),
+                ),
+                rx.cond(
+                    offer.rate_label != "",
+                    rx.text(
+                        offer.rate_label,
+                        color="#b8afc8",
+                        size="1",
+                        text_align="right",
+                    ),
+                    rx.fragment(),
+                ),
+                align="end",
+                spacing="1",
+            ),
+            align="center",
+            justify="between",
+            width="100%",
+            spacing="3",
+        ),
+        rx.cond(
+            offer.timestamp_label != "",
+            rx.text(
+                offer.timestamp_label,
+                color="#b8afc8",
+                size="1",
+                role="status",
+                margin_top="0.5rem",
+            ),
+            rx.fragment(),
+        ),
+        width="100%",
+        background="rgba(17, 13, 26, 0.94)",
+        border="1px solid #48336a",
     )
 
 
@@ -978,27 +1628,8 @@ def price_comparison_page() -> rx.Component:
     )
 
 
-def auth_brand(clickable: bool = False) -> rx.Component:
-    brand = rx.vstack(
-        rx.icon("gamepad-2", size=38, color="#a78bfa"),
-        rx.text(
-            "COMPARAKEYS",
-            size="2",
-            weight="bold",
-            color="#c4b5fd",
-            letter_spacing="0.18em",
-        ),
-        align="center",
-        spacing="2",
-    )
-    if clickable:
-        return rx.link(
-            brand,
-            href="/catalogo",
-            color="inherit",
-            text_decoration="none",
-        )
-    return brand
+def auth_brand() -> rx.Component:
+    return session_brand_link()
 
 
 def splash_screen() -> rx.Component:
@@ -1066,7 +1697,6 @@ def login_card() -> rx.Component:
                     on_change=AuthState.set_password,
                     placeholder="Sua senha",
                     aria_label="Senha",
-                    aria_describedby="login-password-rule",
                     type=rx.cond(
                         AuthState.password_visible,
                         "text",
@@ -1077,14 +1707,8 @@ def login_card() -> rx.Component:
                     size="3",
                 ),
                 password_visibility_toggle(),
-                rx.text(
-                    "Mínimo de 8 caracteres e ao menos uma letra.",
-                    id="login-password-rule",
-                    color="#b8afc8",
-                    size="1",
-                ),
                 rx.button(
-                    "Cadastrar-se",
+                    "Cadastrar",
                     on_click=AuthState.open_register,
                     variant="outline",
                     width="100%",
@@ -1122,9 +1746,9 @@ def login_card() -> rx.Component:
         width="100%",
         max_width="440px",
         padding="clamp(1rem, 3vh, 1.5rem)",
-        border="1px solid #48336a",
+        border="1px solid var(--ck-purple-border)",
         border_radius="24px",
-        background="rgba(17, 13, 26, 0.94)",
+        background="var(--ck-surface)",
         class_name="auth-card",
     )
 
@@ -1132,7 +1756,7 @@ def login_card() -> rx.Component:
 def register_card() -> rx.Component:
     return rx.box(
         rx.vstack(
-            auth_brand(clickable=True),
+            auth_brand(),
             rx.heading("Crie sua conta", size="6", color="white"),
             rx.text(
                 "Informe seu nome, e-mail e uma senha para se cadastrar.",
@@ -1227,10 +1851,93 @@ def register_card() -> rx.Component:
         width="100%",
         max_width="440px",
         padding="clamp(1rem, 3vh, 1.5rem)",
-        border="1px solid #48336a",
+        border="1px solid var(--ck-purple-border)",
         border_radius="24px",
-        background="rgba(17, 13, 26, 0.94)",
+        background="var(--ck-surface)",
         class_name="auth-card",
+    )
+
+
+def landing_page() -> rx.Component:
+    return rx.fragment(
+        rx.html(f"<style>{GLOBAL_CSS}</style>"),
+        rx.vstack(
+            rx.box(
+                rx.link(
+                    rx.icon("gamepad-2", size=38, color="var(--ck-purple)"),
+                    href="/",
+                    aria_label="ComparaKeys — início",
+                    class_name="landing-topbar-brand",
+                ),
+                rx.cond(
+                    AuthState.is_authenticated,
+                    rx.hstack(
+                        rx.button(
+                            "Ir para o catálogo",
+                            on_click=rx.redirect("/catalogo"),
+                            class_name="landing-nav-button landing-nav-primary",
+                        ),
+                        rx.button(
+                            "Sair",
+                            on_click=AuthState.logout,
+                            class_name="landing-nav-button",
+                        ),
+                        spacing="2",
+                        class_name="landing-topbar-actions",
+                    ),
+                    rx.hstack(
+                        rx.button(
+                            "Entrar",
+                            on_click=rx.redirect("/entrar"),
+                            class_name="landing-nav-button",
+                        ),
+                        rx.button(
+                            "Cadastrar",
+                            on_click=rx.redirect("/cadastro"),
+                            class_name="landing-nav-button landing-nav-primary",
+                        ),
+                        spacing="2",
+                        class_name="landing-topbar-actions",
+                    ),
+                ),
+                class_name="landing-topbar",
+            ),
+            rx.box(
+                rx.box(
+                    rx.heading("Compara Keys", size="9"),
+                    class_name="landing-hero-copy",
+                ),
+                rx.box(
+                    role="presentation",
+                    class_name="landing-hero-art",
+                ),
+                class_name="landing-hero",
+            ),
+            rx.box(role="separator", class_name="landing-divider"),
+            rx.grid(
+                rx.box(
+                    rx.heading("Quem somos", size="5", as_="h2"),
+                    rx.text(
+                        "Somos um projeto acadêmico desenvolvido em grupo para "
+                        "jogadores que querem comparar preços de jogos.",
+                    ),
+                    class_name="landing-info-card",
+                ),
+                rx.box(
+                    rx.heading("Objetivo do site e por que usar", size="5", as_="h2"),
+                    rx.text(
+                        "Compare o preço do mesmo jogo em várias lojas em um só "
+                        "lugar. Veja o menor preço e siga pelos links diretos "
+                        "para as lojas. A compra acontece fora do site.",
+                    ),
+                    class_name="landing-info-card",
+                ),
+                class_name="landing-info-grid",
+            ),
+            width="100%",
+            spacing="0",
+            class_name="landing-page",
+        ),
     )
 
 
@@ -1245,7 +1952,7 @@ def login_page() -> rx.Component:
                 width="100%",
                 min_height="100vh",
                 padding="0.75rem",
-                background="radial-gradient(circle at 50% 25%, #261442 0%, #0b0910 54%, #050407 100%)",
+                class_name="auth-page",
             ),
         ),
     )
@@ -1262,7 +1969,7 @@ def register_page() -> rx.Component:
                 width="100%",
                 min_height="100vh",
                 padding="0.75rem",
-                background="radial-gradient(circle at 50% 25%, #261442 0%, #0b0910 54%, #050407 100%)",
+                class_name="auth-page",
             ),
         ),
     )
@@ -1418,7 +2125,8 @@ def catalog_page() -> rx.Component:
 
 
 app = rx.App(theme=rx.theme(accent_color="violet", radius="large", appearance="dark"))
-app.add_page(login_page, route="/", on_load=AuthState.prepare_form)
+app.add_page(landing_page, route="/")
+app.add_page(login_page, route="/entrar", on_load=AuthState.prepare_form)
 app.add_page(register_page, route="/cadastro", on_load=AuthState.prepare_form)
 app.add_page(
     catalog_page,
