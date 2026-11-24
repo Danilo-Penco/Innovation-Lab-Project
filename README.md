@@ -1,40 +1,88 @@
 # ComparaKeys
 
-Aplicação Reflex para comparar preços atuais de jogos na Steam e na GOG e consultar até cinco ofertas adicionais de lojas via CheapShark. A comparação identifica cada loja pelo nome e logotipo, destaca o menor preço comparável e informa a origem temporal do valor. Steam e GOG permanecem em BRL regional; ofertas CheapShark em USD exibem o valor original e, quando há cotação Frankfurter, o equivalente aproximado em BRL, a taxa exata e a data da cotação. Sem cotação, o preço permanece em US$. A rota pública `/` apresenta o projeto e oferece “Entrar” e “Cadastrar” a visitantes; o login fica em `/entrar` e o cadastro em `/cadastro`. A autenticação usa os endpoints Xano descritos no [contrato da API](docs/xano-setup.md); preços e cotações não são persistidos.
+## 1. Apresentação
 
-Steam e GOG não fornecem um horário específico de atualização do preço nos endpoints públicos consultados; nesses casos, a comparação mostra “Consultado pelo ComparaKeys” no fuso `America/Sao_Paulo`. A CheapShark fornece `lastChange` por oferta, e esse instante é apresentado como atualização informada pela fonte. A leitura do cache de ofertas de cinco minutos preserva o horário original da consulta. As integrações têm timeout de 10 segundos, no máximo uma repetição automática somente para erro de rede/timeout e tratamento de HTTP 429/`Retry-After`; cada falha mantém os resultados válidos das demais lojas e pode ser repetida explicitamente.
+O ComparaKeys é um aplicativo web que compara o preço de jogos de PC em lojas digitais. O usuário pesquisa o nome de um jogo e vê, num só lugar, o valor na Steam e na GOG, em reais, com o menor preço destacado e um link direto para cada loja.
 
-## Ambiente local
+Problema que resolve: o mesmo jogo costuma ter preços diferentes em cada loja, e compará-los manualmente, um a um, é demorado e pouco prático.
 
-Use Python e instale as dependências do projeto:
+Público-alvo: jogadores de PC que querem pagar menos e decidir a compra com mais informação.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
+Projeto acadêmico desenvolvido por Danilo Penco, Kauã Ornaghi e Luca Fusco.
 
-Crie um `.env` local, que é ignorado pelo Git, com os dados de uma instância Xano **de teste**:
+## 2. Acesso ao aplicativo
 
-```dotenv
-XANO_API_URL=https://<host-de-teste>/api:auth
-XANO_TEST_EMAIL=<email-de-teste>
-XANO_TEST_PASSWORD=<senha-de-teste>
-```
+O aplicativo roda localmente.
 
-Substitua os marcadores localmente. Não coloque credenciais no código, README, issues ou logs, e não use conta de produção para o checker.
+Requisitos: Python 3.11 ou superior e uma conta no Xano (plano gratuito) com a API de autenticação configurada.
 
-## Verificações
+    git clone https://github.com/Danilo-Penco/Innovation-Lab-Project
+    cd Innovation-Lab-Project
+    python -m venv .venv
+    .venv\Scripts\activate
+    pip install -r requirements.txt
 
-Execute os testes automatizados:
+Crie um arquivo .env na raiz com a URL da API do Xano:
 
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests
-```
+    XANO_API_URL=https://[SUA-INSTANCIA].xano.io/api:[CODIGO-DO-GRUPO]
 
-Para validar o contrato Xano na instância configurada:
+Inicie o aplicativo e acesse http://localhost:3000:
 
-```powershell
-.\.venv\Scripts\python.exe scripts\check_xano.py
-```
+    python -m reflex run
 
-O checker usa as credenciais somente para login e validação de `auth/me`. Os probes das rotas legadas usam corpo vazio e nunca enviam e-mail, token ou senha a elas; o cadastro sem `name` também usa corpo vazio. O script não imprime token, senha ou respostas integrais e deve ser executado somente em uma instância de teste descartável. Consulte [xano-setup.md](docs/xano-setup.md) para os endpoints e formatos esperados.
+O arquivo docs/xano-setup.md descreve as tabelas e os endpoints do Xano.
+
+## 3. Perfis de usuários
+
+- Visitante (sem login): vê a página inicial, pesquisa jogos e compara preços entre Steam e GOG.
+- Usuário cadastrado: tudo o que o visitante faz, mais acesso ao catálogo de jogos.
+
+## 4. Funcionalidades
+
+- Página inicial pública com apresentação do projeto.
+- Cadastro e login por nome, e-mail e senha, com os dados armazenados no Xano.
+- Catálogo de jogos em ordem aleatória a cada carregamento, com um jogo em destaque e acesso direto à comparação.
+- Busca de jogos pelo nome, com resultados que aparecem enquanto o usuário digita.
+- Comparação de preços entre Steam e GOG em reais, com o menor preço em verde.
+- Links diretos para a página do jogo em cada loja, abertos em nova aba.
+- Mensagens específicas quando o jogo não é encontrado na GOG, quando há mais de uma correspondência ou quando não há preço em reais.
+- Cabeçalho que muda conforme a sessão (Entrar ou Sair).
+- Proteção do catálogo: sem login, o acesso redireciona para a tela de entrada.
+
+## 5. Manual de utilização
+
+### Jornada do visitante
+
+1. Acesse a página inicial (/) e leia a apresentação do projeto.
+2. Vá em /buscar e digite o nome de um jogo.
+3. Escolha o jogo certo na lista de resultados.
+4. Veja a comparação: preço na Steam, preço na GOG e o menor valor em verde.
+5. Clique no nome do jogo para abrir a página dele na loja.
+
+Resultado esperado: os preços aparecem em reais. Se a GOG não tiver o jogo, a tela mostra o preço da Steam com um aviso explicando o motivo.
+
+### Jornada do usuário cadastrado
+
+1. Clique em Cadastrar.
+2. Informe nome, e-mail e uma senha com no mínimo 8 caracteres e pelo menos uma letra.
+3. Após o cadastro, o sistema abre o catálogo.
+4. Clique em qualquer jogo do catálogo para ver a comparação de preços.
+5. Para sair, clique em Sair. Para voltar, use Entrar com o mesmo e-mail e a mesma senha.
+
+Resultado esperado: o catálogo só abre com login. Uma senha sem letras, um e-mail já cadastrado ou credenciais erradas exibem mensagens próprias.
+
+## 6. Exemplos de utilização
+
+- Jogo em ambas as lojas: pesquise "The Witcher 3". Aparecem Steam e GOG, com o menor preço em verde.
+- Jogo só na Steam: pesquise um título que a GOG não vende. A tela mostra o preço da Steam e avisa que não há correspondência na GOG.
+- Senha sem letras: tente se cadastrar com 123456789. O sistema pede letras e números, por exemplo Senha12345.
+- Acesso protegido: abra /catalogo sem estar logado e observe o redirecionamento para /entrar.
+
+## 7. Limitações conhecidas
+
+- O aplicativo roda localmente, a partir do repositório.
+- A GOG é consultada pelo título do jogo. Quando o nome difere entre as lojas, o site mostra só a Steam, em vez de exibir uma correspondência incerta.
+- Os jogos do catálogo são uma lista de exemplo e não representam promoções nem popularidade.
+- Os preços são consultados no momento da busca e guardados em memória por até 5 minutos. Nenhum preço é gravado em banco de dados.
+- Os dados dos usuários ficam no plano gratuito do Xano, que tem limite de requisições.
+- A compra é feita na loja: o site leva o usuário até a página do jogo.
